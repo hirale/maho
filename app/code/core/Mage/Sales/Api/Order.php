@@ -17,7 +17,9 @@ use Maho\Config\ApiResource;
 use ApiPlatform\Metadata\ApiProperty;
 use ApiPlatform\Metadata\Get;
 use ApiPlatform\Metadata\GetCollection;
+use ApiPlatform\Metadata\Link;
 use ApiPlatform\Metadata\Post;
+use Mage\Checkout\Api\Cart;
 use ApiPlatform\Metadata\GraphQl\Query;
 use ApiPlatform\Metadata\GraphQl\QueryCollection;
 use ApiPlatform\Metadata\GraphQl\Mutation;
@@ -55,10 +57,38 @@ use Mage\Customer\Api\Address;
             description: 'Place a new order from cart',
         ),
         new Post(
-            uriTemplate: '/guest-carts/{id}/place-order',
+            // The placeholder is named `maskedQuoteId` rather than `id` so
+            // API Platform's auto-identifier converter doesn't try to coerce
+            // the 32-char hex maskedId into Order.id (which is typed int and
+            // would silently truncate to the leading digits).
+            uriTemplate: '/guest-carts/{maskedQuoteId}/place-order',
             name: 'place_guest_order',
+            uriVariables: [
+                'maskedQuoteId' => new Link(fromClass: Cart::class, identifiers: []),
+            ],
+            requirements: ['maskedQuoteId' => '[a-f0-9]{32}'],
             security: 'true',
             description: 'Place order from guest cart',
+        ),
+        new Get(
+            // Read an order by its human-readable increment id, authenticated
+            // by the one-time `guest_access_token` issued at placement
+            // (X-Order-Token header). Symmetric counterpart to the standard
+            // /orders/{id} Get which uses JWT customer/admin auth. Token is
+            // single-use: consumed (column cleared) on successful read.
+            //
+            // Headless clients (storefronts, mobile apps, kiosks, agents)
+            // call this to render an order-confirmation view without
+            // requiring the customer to be authenticated.
+            uriTemplate: '/orders/{incrementId}/details',
+            name: 'get_order_by_token',
+            uriVariables: [
+                'incrementId' => new Link(fromClass: Order::class, identifiers: []),
+            ],
+            requirements: ['incrementId' => '[a-zA-Z0-9_-]+'],
+            extraProperties: ['no_iri' => true],
+            security: 'true',
+            description: 'Read an order using the per-order one-time access token (X-Order-Token header)',
         ),
     ],
     graphQlOperations: [
