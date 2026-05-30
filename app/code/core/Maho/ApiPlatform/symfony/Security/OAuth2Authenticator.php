@@ -31,9 +31,6 @@ use Symfony\Component\Security\Http\Authenticator\Passport\SelfValidatingPasspor
  */
 class OAuth2Authenticator extends AbstractAuthenticator
 {
-    private const AUTHORIZATION_HEADER = 'Authorization';
-    private const BEARER_PREFIX = 'Bearer ';
-
     public function __construct(
         private JwtService $jwtService,
         private TokenBlacklist $tokenBlacklist,
@@ -47,11 +44,7 @@ class OAuth2Authenticator extends AbstractAuthenticator
     #[\Override]
     public function supports(Request $request): ?bool
     {
-        return $request->headers->has(self::AUTHORIZATION_HEADER)
-            && str_starts_with(
-                $request->headers->get(self::AUTHORIZATION_HEADER, ''),
-                self::BEARER_PREFIX,
-            );
+        return AuthorizationHeader::hasBearerScheme($request);
     }
 
     /**
@@ -60,8 +53,7 @@ class OAuth2Authenticator extends AbstractAuthenticator
     #[\Override]
     public function authenticate(Request $request): Passport
     {
-        $authHeader = $request->headers->get(self::AUTHORIZATION_HEADER, '');
-        $token = substr($authHeader, strlen(self::BEARER_PREFIX));
+        $token = AuthorizationHeader::bearerToken($request);
 
         if (empty($token)) {
             throw new CustomUserMessageAuthenticationException('No API token provided');
@@ -118,11 +110,11 @@ class OAuth2Authenticator extends AbstractAuthenticator
     public function onAuthenticationFailure(Request $request, AuthenticationException $exception): ?Response
     {
         $data = [
-            'error' => 'authentication_error',
+            'error' => 'unauthorized',
             'message' => strtr($exception->getMessageKey(), $exception->getMessageData()),
         ];
 
-        return new JsonResponse($data, Response::HTTP_UNAUTHORIZED);
+        return new JsonResponse($data, Response::HTTP_UNAUTHORIZED, ['WWW-Authenticate' => 'Bearer']);
     }
 
     /**

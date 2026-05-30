@@ -14,6 +14,7 @@ namespace Maho\ApiPlatform\EventListener;
 
 use ApiPlatform\Metadata\Resource\Factory\ResourceMetadataCollectionFactoryInterface;
 use Maho\ApiPlatform\Security\ApiUser;
+use Maho\ApiPlatform\Security\PublicOperationSecurity;
 use Symfony\Component\EventDispatcher\Attribute\AsEventListener;
 use Symfony\Component\HttpKernel\Event\RequestEvent;
 use Symfony\Component\HttpKernel\Exception\AccessDeniedHttpException;
@@ -88,10 +89,10 @@ class AdminAclListener
             return;
         }
 
-        // Public operations (security: 'true') let anyone in by design —
-        // /countries, /store-config, /auth/token, etc. Admins should reach
-        // them just like customers and unauthenticated callers do, so skip
-        // the ACL gate when the operation declares itself public.
+        // Public operations let anyone in by design — /countries, /store-config,
+        // /auth/token, etc. Admins should reach them just like customers and
+        // unauthenticated callers do, so skip the ACL gate when the operation
+        // declares itself public.
         if ($this->isPublicOperation($resourceClass, $operationName)) {
             return;
         }
@@ -147,8 +148,7 @@ class AdminAclListener
     }
 
     /**
-     * True when the matched operation declares `security: 'true'`. API
-     * Platform may quote-wrap the value, so we trim quotes before comparing.
+     * True when the matched operation declares a public security expression.
      */
     private function isPublicOperation(string $resourceClass, string $operationName): bool
     {
@@ -159,6 +159,6 @@ class AdminAclListener
         } catch (\Throwable) {
             return false;
         }
-        return $security !== null && trim($security, '" ') === 'true';
+        return PublicOperationSecurity::isPublic($security);
     }
 }

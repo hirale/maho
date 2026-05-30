@@ -166,13 +166,23 @@ uses()
         // ephemeral test database anyway.
         if (!$protocolsEnabled) {
             // Frontend/Backend tearDown calls Mage::reset(), so re-bootstrap before DB writes.
-            \Mage::app();
-            $protocols = ['rest_v2', 'graphql', 'admin_graphql', 'legacy_rest', 'soap', 'v2_soap', 'xmlrpc', 'jsonrpc'];
-            $config = \Mage::getModel('core/config');
-            foreach ($protocols as $protocol) {
-                $config->saveConfig('apiplatform/protocols/' . $protocol, '1', 'default', 0);
+            $previousErrorHandler = set_error_handler(static fn(): bool => false);
+            restore_error_handler();
+            try {
+                \Mage::app();
+                $protocols = ['rest_v2', 'graphql', 'admin_graphql', 'legacy_rest', 'soap', 'v2_soap', 'xmlrpc', 'jsonrpc'];
+                $config = \Mage::getModel('core/config');
+                foreach ($protocols as $protocol) {
+                    $config->saveConfig('apiplatform/protocols/' . $protocol, '1', 'default', 0);
+                }
+                \Mage::app()->getCache()->cleanType('config');
+            } finally {
+                $currentErrorHandler = set_error_handler(static fn(): bool => false);
+                restore_error_handler();
+                if ($currentErrorHandler !== $previousErrorHandler) {
+                    restore_error_handler();
+                }
             }
-            \Mage::app()->getCache()->cleanType('config');
             $protocolsEnabled = true;
         }
 

@@ -296,7 +296,7 @@ class ControllerDispatcher
         }
 
         foreach ($modulesNode->children() as $customModule) {
-            $moduleName = (string) $customModule;
+            $moduleName = trim((string) $customModule);
             if (!$moduleName) {
                 continue;
             }
@@ -362,7 +362,7 @@ class ControllerDispatcher
             }
 
             foreach ($modulesNode->children() as $customModule) {
-                $moduleName = (string) $customModule;
+                $moduleName = trim((string) $customModule);
                 if (!$moduleName) {
                     continue;
                 }

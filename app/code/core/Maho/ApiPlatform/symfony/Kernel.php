@@ -348,13 +348,33 @@ class Kernel extends BaseKernel
 
         $services->set(EventListener\DefaultDenyListener::class)
             ->arg('$resourceMetadataFactory', new Reference('api_platform.metadata.resource.metadata_collection_factory'))
-            ->tag('kernel.event_listener', ['event' => 'kernel.request', 'priority' => 28]);
+            ->tag('kernel.event_listener', ['event' => 'kernel.request', 'priority' => 5]);
+
+        // Register security.expression_language explicitly. SecurityBundle's
+        // security.php declares this service unconditionally, but the
+        // container compiler's removal passes drop it because the only
+        // consumer (api-platform/core's ResourceAccessChecker) wires it via
+        // service(...)->nullOnInvalid(), which the compiler treats as a soft
+        // reference. Once dropped, the api-platform alias falls back to null,
+        // ResourceAccessChecker::usesObjectVariable() invokes parse() on a
+        // null property, and every secured operation 500s.
+        //
+        // Re-declaring the service as PUBLIC here anchors it so removal passes
+        // can't prune it; the api-platform-side alias then resolves normally
+        // and the real ExpressionLanguage is injected.
+        $services->set('security.expression_language', \Symfony\Component\Security\Core\Authorization\ExpressionLanguage::class)
+            ->public();
     }
 
     protected function configureRoutes(RoutingConfigurator $routes): void
     {
         $routes->import('.', 'api_platform')->prefix('/api');
-        $routes->import('%kernel.project_dir%/Controller/', 'attribute');
+        // Use __DIR__ rather than %kernel.project_dir%: on Symfony 7.4 the
+        // placeholder is not resolved before reaching the routing file loader
+        // (services->load above does resolve it, but the routing path does not),
+        // so the loader sees the literal placeholder and the directory check
+        // fails. Concrete __DIR__ side-steps the substitution gap.
+        $routes->import(__DIR__ . '/Controller/', 'attribute');
     }
 
     /**

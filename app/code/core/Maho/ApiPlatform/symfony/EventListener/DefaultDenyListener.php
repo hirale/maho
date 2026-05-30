@@ -12,10 +12,9 @@ declare(strict_types=1);
 namespace Maho\ApiPlatform\EventListener;
 
 use ApiPlatform\Metadata\Resource\Factory\ResourceMetadataCollectionFactoryInterface;
-use Symfony\Component\EventDispatcher\Attribute\AsEventListener;
+use Maho\ApiPlatform\Security\PublicOperationSecurity;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpKernel\Event\RequestEvent;
-use Symfony\Component\HttpKernel\KernelEvents;
 use Symfony\Component\Security\Core\Authentication\Token\Storage\TokenStorageInterface;
 
 /**
@@ -27,11 +26,10 @@ use Symfony\Component\Security\Core\Authentication\Token\Storage\TokenStorageInt
  * expression is evaluated — which means a missing entity returns 404 before
  * the 401 can fire.
  *
- * This listener runs after routing (priority 28, between router at 32 and
- * API Platform's controller) and rejects unauthenticated requests to
- * non-public operations before the Provider has a chance to run.
+ * This listener runs after the firewall and store authorization listeners
+ * (priority 5) and rejects unauthenticated requests to non-public operations
+ * before API Platform's read provider has a chance to run.
  */
-#[AsEventListener(event: KernelEvents::REQUEST, priority: 28)]
 class DefaultDenyListener
 {
     public function __construct(
@@ -57,12 +55,6 @@ class DefaultDenyListener
             return;
         }
 
-        // Also check for Bearer header presence — the authenticator may not have
-        // run yet at this priority, so let Symfony's firewall handle validation
-        if (str_starts_with($request->headers->get('Authorization', ''), 'Bearer ')) {
-            return;
-        }
-
         // Look up the operation's security attribute
         try {
             $resourceMetadata = $this->resourceMetadataFactory->create($resourceClass);
@@ -74,12 +66,11 @@ class DefaultDenyListener
         }
 
         // Public operations — no auth needed
-        // API Platform may wrap the value in quotes, so strip them before comparing
-        if ($security !== null && trim($security, '" ') === 'true') {
+        if (PublicOperationSecurity::isPublic($security)) {
             return;
         }
 
-        // No Bearer token and operation requires auth (or has no security attr) → 401
+        // No authenticated user and operation requires auth (or has no security attr) -> 401
         $event->setResponse(new JsonResponse([
             'error' => 'unauthorized',
             'message' => 'Authentication required',

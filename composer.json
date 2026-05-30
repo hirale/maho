@@ -70,7 +70,8 @@
         "symfony/framework-bundle": "^7.4",
         "symfony/security-bundle": "^7.4",
         "webonyx/graphql-php": "^15.31",
-        "lcobucci/jwt": "^5.6"
+        "lcobucci/jwt": "^5.6",
+        "symfony/expression-language": "^7.4"
     },
     "replace": {
         "magento-hackathon/magento-composer-installer": "^99.99",

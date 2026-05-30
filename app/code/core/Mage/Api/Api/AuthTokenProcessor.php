@@ -374,7 +374,7 @@ class AuthTokenProcessor extends \Maho\ApiPlatform\Processor
                 throw new UnauthorizedHttpException('Bearer', 'Customer account is inactive');
             }
 
-            $this->tokenBlacklist->revoke($payload->jti, (int) ($payload->exp ?? time() + 86400));
+            $this->tokenBlacklist->revoke($payload->jti, self::resolveExpiryTimestamp($payload->exp ?? null));
             $newToken = $this->jwtService->generateCustomerToken($customer);
 
             $dto = new AuthToken();
@@ -397,13 +397,30 @@ class AuthTokenProcessor extends \Maho\ApiPlatform\Processor
 
         if (str_starts_with($authHeader, 'Bearer ')) {
             $tokenString = substr($authHeader, 7);
+
+            // Decode/validation errors mean the token wasn't usable in the
+            // first place — fine to treat as "already logged out".
+            // A revoke() failure is different: the token IS valid, the
+            // cache write just failed, and reporting `success` would lie
+            // to the client about a token that's still active. Keep the
+            // try/catch narrow to the decode path; let revoke errors
+            // bubble up so the platform returns a 5xx and the client can
+            // retry logout instead of trusting a silent half-success.
+            $payload = null;
             try {
                 $payload = $this->jwtService->decodeToken($tokenString);
-                if (isset($payload->jti)) {
-                    $this->tokenBlacklist->revoke($payload->jti, (int) ($payload->exp ?? time() + 86400));
-                }
-            } catch (\Exception) {
-                // Token is already invalid/expired, consider it logged out
+            } catch (\Lcobucci\JWT\Exception) {
+                // Token was malformed / expired / mis-signed — there's no
+                // jti to revoke, so a silent "already logged out" is
+                // honest. Cache backend failures from revoke() below are
+                // intentionally NOT caught here.
+            }
+
+            if ($payload !== null && isset($payload->jti)) {
+                $this->tokenBlacklist->revoke(
+                    $payload->jti,
+                    self::resolveExpiryTimestamp($payload->exp ?? null),
+                );
             }
         }
 
@@ -412,6 +429,30 @@ class AuthTokenProcessor extends \Maho\ApiPlatform\Processor
         $dto->message = 'Successfully logged out';
 
         return $dto;
+    }
+
+    /**
+     * Normalize a JWT `exp` claim to a unix timestamp before handing it to
+     * TokenBlacklist::revoke().
+     *
+     * JwtService::decodeToken hydrates `exp` as a DateTimeImmutable (lcobucci
+     * 5.x returns time claims as objects). A bare `(int)` cast on the object
+     * emits a PHP warning and yields 1, which collapses
+     * `TokenBlacklist::revoke()`'s `ttl = $expiresAt - time()` to a large
+     * negative number — short-circuiting the cache save and silently
+     * no-op'ing both /auth/refresh rotation and /auth/logout. Without this
+     * normalization, refresh tokens stay valid forever and logout never
+     * actually revokes anything.
+     */
+    private static function resolveExpiryTimestamp(mixed $exp): int
+    {
+        if ($exp instanceof \DateTimeInterface) {
+            return $exp->getTimestamp();
+        }
+        if (is_int($exp) && $exp > 0) {
+            return $exp;
+        }
+        return time() + 86400;
     }
 
 }
