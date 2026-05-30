@@ -13,6 +13,7 @@ declare(strict_types=1);
 namespace Maho\ApiPlatform\EventListener;
 
 use Maho\ApiPlatform\Exception\ApiException;
+use Maho\ApiPlatform\Security\AuthorizationHeader;
 use Symfony\Component\EventDispatcher\EventSubscriberInterface;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpKernel\Event\ExceptionEvent;
@@ -120,7 +121,7 @@ class ApiExceptionListener implements EventSubscriberInterface
             // If user is not authenticated at all, return 401
             // Check for Bearer token specifically (Basic auth is site-level, not API auth)
             $hasBearerToken = $request !== null
-                && str_starts_with($request->headers->get('Authorization', ''), 'Bearer ');
+                && AuthorizationHeader::bearerToken($request) !== null;
             // Use the exception class to recognize "not authenticated" rather
             // than matching on the message string (Symfony has rephrased it
             // before; a security-component upgrade silently flips 401 ↔ 403).
@@ -157,7 +158,7 @@ class ApiExceptionListener implements EventSubscriberInterface
             // (correct HTTP semantics: 401 = "provide credentials", 403 = "credentials insufficient")
             // Basic auth is site-level access (dev/staging), not API authentication
             $hasBearerToken = $request !== null
-                && str_starts_with($request->headers->get('Authorization', ''), 'Bearer ');
+                && AuthorizationHeader::bearerToken($request) !== null;
             if ($statusCode === 403 && !$hasBearerToken) {
                 $statusCode = 401;
             }

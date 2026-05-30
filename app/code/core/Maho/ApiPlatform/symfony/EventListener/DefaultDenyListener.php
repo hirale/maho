@@ -12,6 +12,8 @@ declare(strict_types=1);
 namespace Maho\ApiPlatform\EventListener;
 
 use ApiPlatform\Metadata\Resource\Factory\ResourceMetadataCollectionFactoryInterface;
+use Maho\ApiPlatform\Security\AuthorizationHeader;
+use Maho\ApiPlatform\Security\PublicOperationSecurity;
 use Symfony\Component\EventDispatcher\Attribute\AsEventListener;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpKernel\Event\RequestEvent;
@@ -58,8 +60,10 @@ class DefaultDenyListener
         }
 
         // Also check for Bearer header presence — the authenticator may not have
-        // run yet at this priority, so let Symfony's firewall handle validation
-        if (str_starts_with($request->headers->get('Authorization', ''), 'Bearer ')) {
+        // run yet at this priority, so let Symfony's firewall handle validation.
+        // Use the shared scheme check so Bearer detection stays consistent with
+        // OAuth2Authenticator::supports().
+        if (AuthorizationHeader::hasBearerScheme($request)) {
             return;
         }
 
@@ -74,8 +78,7 @@ class DefaultDenyListener
         }
 
         // Public operations — no auth needed
-        // API Platform may wrap the value in quotes, so strip them before comparing
-        if ($security !== null && trim($security, '" ') === 'true') {
+        if (PublicOperationSecurity::isPublic($security)) {
             return;
         }
 

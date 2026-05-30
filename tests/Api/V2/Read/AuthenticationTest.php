@@ -39,6 +39,26 @@ describe('API v2 Authentication', function (): void {
 
     });
 
+    describe('with tokenless Bearer scheme', function (): void {
+
+        // Regression coverage for centralizing Bearer detection: a scheme-only
+        // `Authorization: Bearer` (no token) is treated as "no credentials", so
+        // it must not 401 a public operation before its access control runs,
+        // while a protected operation is still denied.
+        it('does not block a public endpoint when the Bearer header is tokenless', function (): void {
+            $response = apiGet('/api/rest/v2/products', null, ['Authorization' => 'Bearer ']);
+
+            expect($response['status'])->toBe(200);
+        });
+
+        it('still rejects a protected endpoint when the Bearer header is tokenless', function (): void {
+            $response = apiGet('/api/rest/v2/customers/me', null, ['Authorization' => 'Bearer ']);
+
+            expect($response['status'])->toBe(401);
+        });
+
+    });
+
     describe('with invalid token', function (): void {
 
         it('rejects requests with malformed token', function (): void {
