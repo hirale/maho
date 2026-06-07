@@ -176,15 +176,15 @@ final class CustomerProcessor extends \Maho\ApiPlatform\Processor
             }
         }
 
-        // Send the registration email, mirroring the classic flow in
-        // Mage_Customer_AccountController::_successProcessRegistration(): when confirmation is
-        // required the customer needs the confirmation link before they can log in, otherwise
-        // they receive the welcome ("registered") email. The account is already persisted at
-        // this point, so a mail failure must not turn a successful creation into an error —
-        // log it and continue.
+        // Send the registration email, mirroring Mage_Customer_AccountController: the confirmation
+        // link when confirmation is required, otherwise the welcome ("registered") email — without
+        // it a confirmation-required store leaves the account unconfirmed and unable to log in. The
+        // password is intentionally not passed: the new-account templates don't render it. The
+        // account is already persisted, so a mail failure must not fail an otherwise-successful
+        // creation — log it and continue.
         try {
             $emailType = $customer->isConfirmationRequired() ? 'confirmation' : 'registered';
-            $customer->sendNewAccountEmail($emailType, '', $storeId, $data->password);
+            $customer->sendNewAccountEmail($emailType, '', $storeId);
         } catch (\Exception $e) {
             \Mage::logException($e);
         }
@@ -254,10 +254,10 @@ final class CustomerProcessor extends \Maho\ApiPlatform\Processor
         }
 
         // Same registration email as createCustomer(): confirmation link when confirmation is
-        // required, otherwise the welcome ("registered") email — otherwise a confirmation-required
-        // store leaves the POS-created account stuck and unable to log in. The POS password is
-        // random and unknown to the customer, so don't email it (pass null); they set their own
-        // via password reset. A mail failure must not fail the already-created account.
+        // required, otherwise the welcome ("registered") email — without it a confirmation-required
+        // store leaves the POS-created account stuck and unable to log in. The random POS password
+        // is never emailed (the templates don't render it anyway); the customer sets their own via
+        // password reset. A mail failure must not fail the already-created account.
         try {
             $emailType = $customer->isConfirmationRequired() ? 'confirmation' : 'registered';
             $customer->sendNewAccountEmail($emailType, '', $storeId);
