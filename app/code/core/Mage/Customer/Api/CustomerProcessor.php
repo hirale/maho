@@ -73,10 +73,10 @@ final class CustomerProcessor extends \Maho\ApiPlatform\Processor
 
         // Handle REST POST aliases for auth routes
         if ($operationName === 'forgot_password_rest') {
-            return $this->forgotPassword($context);
+            return $this->forgotPassword($data);
         }
         if ($operationName === 'reset_password_rest') {
-            return $this->resetPassword($context);
+            return $this->resetPassword($data);
         }
         if ($operationName === 'create_from_order') {
             return $this->createAccountFromOrder($context);
@@ -94,8 +94,8 @@ final class CustomerProcessor extends \Maho\ApiPlatform\Processor
             'customerLogout' => $this->customerLogout($context),
             'updateCustomer' => $this->updateCustomerGraphQl($context),
             'changePassword' => $this->changePasswordGraphQl($context),
-            'forgotPassword' => $this->forgotPassword($context),
-            'resetPassword' => $this->resetPassword($context),
+            'forgotPassword' => $this->forgotPasswordGraphQl($context),
+            'resetPassword' => $this->resetPasswordGraphQl($context),
             default => $data instanceof Customer ? $data : new Customer(),
         };
     }
@@ -176,6 +176,19 @@ final class CustomerProcessor extends \Maho\ApiPlatform\Processor
             }
         }
 
+        // Send the registration email, mirroring Mage_Customer_AccountController: the confirmation
+        // link when confirmation is required, otherwise the welcome ("registered") email — without
+        // it a confirmation-required store leaves the account unconfirmed and unable to log in. The
+        // password is intentionally not passed: the new-account templates don't render it. The
+        // account is already persisted, so a mail failure must not fail an otherwise-successful
+        // creation — log it and continue.
+        try {
+            $emailType = $customer->isConfirmationRequired() ? 'confirmation' : 'registered';
+            $customer->sendNewAccountEmail($emailType, '', $storeId);
+        } catch (\Exception $e) {
+            \Mage::logException($e);
+        }
+
         // Return the created customer (without password)
         return Customer::fromModel($customer);
     }
@@ -238,6 +251,18 @@ final class CustomerProcessor extends \Maho\ApiPlatform\Processor
         } catch (\Exception $e) {
             \Mage::logException($e);
             throw new \RuntimeException('Failed to create customer');
+        }
+
+        // Same registration email as createCustomer(): confirmation link when confirmation is
+        // required, otherwise the welcome ("registered") email — without it a confirmation-required
+        // store leaves the POS-created account stuck and unable to log in. The random POS password
+        // is never emailed (the templates don't render it anyway); the customer sets their own via
+        // password reset. A mail failure must not fail the already-created account.
+        try {
+            $emailType = $customer->isConfirmationRequired() ? 'confirmation' : 'registered';
+            $customer->sendNewAccountEmail($emailType, '', $storeId);
+        } catch (\Exception $e) {
+            \Mage::logException($e);
         }
 
         return Customer::fromModel($customer);
@@ -381,13 +406,55 @@ final class CustomerProcessor extends \Maho\ApiPlatform\Processor
     }
 
     /**
-     * Send forgot password email
+     * Send forgot password email (REST entry point)
      */
-    private function forgotPassword(array $context): Customer
+    private function forgotPassword(Customer $data): Customer
+    {
+        return $this->doForgotPassword($data->email);
+    }
+
+    /**
+     * Send forgot password email via GraphQL mutation
+     */
+    private function forgotPasswordGraphQl(array $context): Customer
+    {
+        $args = $context['args']['input'] ?? [];
+
+        return $this->doForgotPassword($args['email'] ?? '');
+    }
+
+    /**
+     * Reset password with token (REST entry point)
+     */
+    private function resetPassword(Customer $data): Customer
+    {
+        return $this->doResetPassword(
+            email: $data->email,
+            resetToken: $data->resetToken ?? '',
+            newPassword: $data->newPassword ?? '',
+        );
+    }
+
+    /**
+     * Reset password with token via GraphQL mutation
+     */
+    private function resetPasswordGraphQl(array $context): Customer
+    {
+        $args = $context['args']['input'] ?? [];
+
+        return $this->doResetPassword(
+            email: $args['email'] ?? '',
+            resetToken: $args['resetToken'] ?? '',
+            newPassword: $args['newPassword'] ?? '',
+        );
+    }
+
+    /**
+     * Shared logic for sending the forgot-password email (used by both REST and GraphQL)
+     */
+    private function doForgotPassword(string $email): Customer
     {
         StoreContext::ensureStore();
-        $args = $context['args']['input'] ?? [];
-        $email = $args['email'] ?? '';
 
         if (empty($email)) {
             throw new BadRequestHttpException('Email is required');
@@ -421,15 +488,13 @@ final class CustomerProcessor extends \Maho\ApiPlatform\Processor
     }
 
     /**
-     * Reset password with token
+     * Shared logic for resetting a password with a token (used by both REST and GraphQL)
      */
-    private function resetPassword(array $context): Customer
+    private function doResetPassword(#[\SensitiveParameter]
+        string $email, string $resetToken, #[\SensitiveParameter]
+        string $newPassword): Customer
     {
         StoreContext::ensureStore();
-        $args = $context['args']['input'] ?? [];
-        $email = $args['email'] ?? '';
-        $resetToken = $args['resetToken'] ?? '';
-        $newPassword = $args['newPassword'] ?? '';
 
         if (empty($email) || empty($resetToken) || empty($newPassword)) {
             throw new BadRequestHttpException('Email, reset token, and new password are required');

@@ -217,6 +217,10 @@ class Customer extends CrudResource
     #[ApiProperty(writable: true, readable: false)]
     public ?string $newPassword = null;
 
+    /** @var string|null Reset token for password reset */
+    #[ApiProperty(writable: true, readable: false)]
+    public ?string $resetToken = null;
+
     public static function afterLoad(self $dto, object $model): void
     {
         $dto->fullName = trim(($dto->firstname ?? '') . ' ' . ($dto->lastname ?? ''));

@@ -121,7 +121,7 @@ class ApiExceptionListener implements EventSubscriberInterface
             // If user is not authenticated at all, return 401
             // Check for Bearer token specifically (Basic auth is site-level, not API auth)
             $hasBearerToken = $request !== null
-                && AuthorizationHeader::hasBearerScheme($request);
+                && AuthorizationHeader::bearerToken($request) !== null;
             // Use the exception class to recognize "not authenticated" rather
             // than matching on the message string (Symfony has rephrased it
             // before; a security-component upgrade silently flips 401 ↔ 403).
@@ -158,7 +158,7 @@ class ApiExceptionListener implements EventSubscriberInterface
             // (correct HTTP semantics: 401 = "provide credentials", 403 = "credentials insufficient")
             // Basic auth is site-level access (dev/staging), not API authentication
             $hasBearerToken = $request !== null
-                && AuthorizationHeader::hasBearerScheme($request);
+                && AuthorizationHeader::bearerToken($request) !== null;
             if ($statusCode === 403 && !$hasBearerToken) {
                 $statusCode = 401;
             }

@@ -18,9 +18,18 @@ final class AuthorizationHeader
 {
     private const string AUTHORIZATION_HEADER = 'Authorization';
 
+    /**
+     * True only when the Authorization header carries a usable Bearer token —
+     * the scheme followed by a non-empty token. A scheme-only `Bearer` (no
+     * token) returns false on purpose: callers gate on this to decide whether
+     * to engage the authenticator / defer to the firewall, and a malformed
+     * tokenless header must not make a public operation 401 before its access
+     * control is even consulted. Derived from bearerToken() so the two can
+     * never disagree.
+     */
     public static function hasBearerScheme(Request $request): bool
     {
-        return preg_match('/^\s*Bearer(?:\s|$)/i', self::authorizationHeader($request)) === 1;
+        return self::bearerToken($request) !== null;
     }
 
     public static function bearerToken(Request $request): ?string
