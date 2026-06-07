@@ -176,6 +176,19 @@ final class CustomerProcessor extends \Maho\ApiPlatform\Processor
             }
         }
 
+        // Send the registration email, mirroring the classic flow in
+        // Mage_Customer_AccountController::_successProcessRegistration(): when confirmation is
+        // required the customer needs the confirmation link before they can log in, otherwise
+        // they receive the welcome ("registered") email. The account is already persisted at
+        // this point, so a mail failure must not turn a successful creation into an error —
+        // log it and continue.
+        try {
+            $emailType = $customer->isConfirmationRequired() ? 'confirmation' : 'registered';
+            $customer->sendNewAccountEmail($emailType, '', $storeId, $data->password);
+        } catch (\Exception $e) {
+            \Mage::logException($e);
+        }
+
         // Return the created customer (without password)
         return Customer::fromModel($customer);
     }
@@ -238,6 +251,18 @@ final class CustomerProcessor extends \Maho\ApiPlatform\Processor
         } catch (\Exception $e) {
             \Mage::logException($e);
             throw new \RuntimeException('Failed to create customer');
+        }
+
+        // Same registration email as createCustomer(): confirmation link when confirmation is
+        // required, otherwise the welcome ("registered") email — otherwise a confirmation-required
+        // store leaves the POS-created account stuck and unable to log in. The POS password is
+        // random and unknown to the customer, so don't email it (pass null); they set their own
+        // via password reset. A mail failure must not fail the already-created account.
+        try {
+            $emailType = $customer->isConfirmationRequired() ? 'confirmation' : 'registered';
+            $customer->sendNewAccountEmail($emailType, '', $storeId);
+        } catch (\Exception $e) {
+            \Mage::logException($e);
         }
 
         return Customer::fromModel($customer);
