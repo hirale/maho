@@ -1,14 +1,11 @@
 <?php
 
-declare(strict_types=1);
-
 /**
- * Maho
- *
- * @package    MahoLib
- * @copyright  Copyright (c) 2024-2026 Maho (https://mahocommerce.com)
- * @license    https://opensource.org/licenses/osl-3.0.php  Open Software License (OSL 3.0)
+ * SPDX-FileCopyrightText: 2024-2026 Maho <https://mahocommerce.com>
+ * SPDX-License-Identifier: OSL-3.0
  */
+
+declare(strict_types=1);
 
 namespace Maho\Db\Adapter\Pdo;
 
@@ -180,6 +177,9 @@ class Pgsql extends AbstractPdoAdapter
         // (libpq checks for Kerberos credentials after fork which causes SIGSEGV)
         $params['gssencmode'] = $this->_config['gssencmode'] ?? 'disable';
 
+        // Doctrine's Params shape doesn't list PG-specific keys (sslmode,
+        // gssencmode) even though their own PgSQL driver reads them at runtime.
+        // @phpstan-ignore argument.type
         $this->_connection = \Doctrine\DBAL\DriverManager::getConnection($params);
         $this->_debugStat(self::DEBUG_CONNECT, '');
 
@@ -2879,8 +2879,8 @@ class Pgsql extends AbstractPdoAdapter
         $conditionKeyMap = [
             'eq'            => '{{fieldName}} = ?',
             'neq'           => '{{fieldName}} != ?',
-            'like'          => '{{fieldName}} LIKE ?',
-            'nlike'         => '{{fieldName}} NOT LIKE ?',
+            'like'          => '{{fieldName}} ILIKE ?',
+            'nlike'         => '{{fieldName}} NOT ILIKE ?',
             'in'            => '{{fieldName}} IN(?)',
             'nin'           => '{{fieldName}} NOT IN(?)',
             'is'            => '{{fieldName}} IS ?',

@@ -1,11 +1,9 @@
 <?php
 
 /**
- * Maho
- *
- * @package    Tests
- * @copyright  Copyright (c) 2025-2026 Maho (https://mahocommerce.com)
- * @license    https://opensource.org/licenses/osl-3.0.php  Open Software License (OSL 3.0)
+ * SPDX-FileCopyrightText: 2025-2026 Maho <https://mahocommerce.com>
+ * SPDX-License-Identifier: OSL-3.0
+ * @package Tests
  */
 
 declare(strict_types=1);
@@ -134,6 +132,17 @@ class ApiV2Helper
             $idList = implode(',', array_map('intval', $ids));
             try {
                 $write->query("DELETE FROM catalog_category_entity WHERE entity_id IN ({$idList})");
+            } catch (\Exception $e) {
+                // Ignore cleanup errors
+            }
+        }
+
+        // Delete revocation requests
+        if (!empty(self::$createdEntities['revocation_request'])) {
+            $ids = self::$createdEntities['revocation_request'];
+            $idList = implode(',', array_map('intval', $ids));
+            try {
+                $write->query("DELETE FROM revocation_request WHERE request_id IN ({$idList})");
             } catch (\Exception $e) {
                 // Ignore cleanup errors
             }

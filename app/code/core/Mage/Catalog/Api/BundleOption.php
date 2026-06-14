@@ -1,12 +1,9 @@
 <?php
 
 /**
- * Maho
- *
- * @category   Maho
- * @package    Maho_Catalog
- * @copyright  Copyright (c) 2026 Maho (https://mahocommerce.com)
- * @license    https://opensource.org/licenses/osl-3.0.php  Open Software License (OSL 3.0)
+ * SPDX-FileCopyrightText: 2026 Maho <https://mahocommerce.com>
+ * SPDX-License-Identifier: OSL-3.0
+ * @package Maho_Catalog
  */
 
 declare(strict_types=1);
@@ -83,7 +80,7 @@ class BundleOption extends \Maho\ApiPlatform\Resource
     #[ApiProperty(description: 'Sort order')]
     public int $position = 0;
 
-    /** @var array<array{productId: int, sku: string, name: string, price: float, priceType: string, qty: float, canChangeQty: bool, isDefault: bool, position: int}> */
+    /** @var array<array{selectionId?: int, productId: int, sku: string, name: string, price: float, priceType: string, qty: float, canChangeQty: bool, isDefault: bool, position: int}> */
     #[ApiProperty(description: 'Bundle selections')]
     public array $selections = [];
 }

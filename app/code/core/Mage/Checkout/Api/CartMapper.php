@@ -1,15 +1,12 @@
 <?php
 
-declare(strict_types=1);
-
 /**
- * Maho
- *
- * @category   Maho
- * @package    Mage_Checkout
- * @copyright  Copyright (c) 2026 Maho (https://mahocommerce.com)
- * @license    https://opensource.org/licenses/osl-3.0.php  Open Software License (OSL 3.0)
+ * SPDX-FileCopyrightText: 2026 Maho <https://mahocommerce.com>
+ * SPDX-License-Identifier: OSL-3.0
+ * @package Mage_Checkout
  */
+
+declare(strict_types=1);
 
 namespace Mage\Checkout\Api;
 
@@ -240,6 +237,8 @@ class CartMapper
 
     /**
      * Map Maho quote to prices array
+     *
+     * @return array{subtotal: float, subtotalInclTax: float, subtotalWithDiscount: float, discountAmount: ?float, shippingAmount: ?float, shippingAmountInclTax: ?float, taxAmount: float, grandTotal: float, giftcardAmount: ?float}
      */
     public function mapPricesToArray(\Mage_Sales_Model_Quote $quote): array
     {

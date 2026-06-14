@@ -1,11 +1,9 @@
 <?php
 
 /**
- * Maho
- *
- * @package    Maho_Captcha
- * @copyright  Copyright (c) 2025-2026 Maho (https://mahocommerce.com)
- * @license    https://opensource.org/licenses/osl-3.0.php  Open Software License (OSL 3.0)
+ * SPDX-FileCopyrightText: 2025-2026 Maho <https://mahocommerce.com>
+ * SPDX-License-Identifier: OSL-3.0
+ * @package Maho_Captcha
  */
 
 class Maho_Captcha_Model_Observer
@@ -16,6 +14,7 @@ class Maho_Captcha_Model_Observer
     #[Maho\Config\Observer('controller_action_predispatch_customer_account_forgotpasswordpost', area: 'frontend')]
     #[Maho\Config\Observer('controller_action_predispatch_newsletter_subscriber_new', area: 'frontend')]
     #[Maho\Config\Observer('controller_action_predispatch_review_product_post', area: 'frontend')]
+    #[Maho\Config\Observer('controller_action_predispatch_revocation_index_submit', area: 'frontend')]
     #[Maho\Config\Observer('controller_action_predispatch_wishlist_index_send', area: 'frontend')]
     public function verify(\Maho\Event\Observer $observer): void
     {

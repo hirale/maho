@@ -1,15 +1,12 @@
 <?php
 
-declare(strict_types=1);
-
 /**
- * Maho
- *
- * @category   Maho
- * @package    Mage_Sales
- * @copyright  Copyright (c) 2026 Maho (https://mahocommerce.com)
- * @license    https://opensource.org/licenses/osl-3.0.php  Open Software License (OSL 3.0)
+ * SPDX-FileCopyrightText: 2026 Maho <https://mahocommerce.com>
+ * SPDX-License-Identifier: OSL-3.0
+ * @package Mage_Sales
  */
+
+declare(strict_types=1);
 
 namespace Mage\Sales\Api;
 
@@ -150,7 +147,7 @@ final class OrderProcessor extends \Maho\ApiPlatform\Processor
         if ($shippingMethod && !$quote->isVirtual()) {
             $shippingAddress = $quote->getShippingAddress();
             $shippingAddress->setShippingMethod($shippingMethod);
-            $shippingAddress->setCollectShippingRates(true);
+            $shippingAddress->setCollectShippingRates(1);
         }
         $quote->setTotalsCollectedFlag(false);
         $quote->collectTotals();

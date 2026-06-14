@@ -1,14 +1,12 @@
 <?php
 
-declare(strict_types=1);
-
 /**
- * Maho
- *
- * @package    Maho_ApiPlatform
- * @copyright  Copyright (c) 2026 Maho (https://mahocommerce.com)
- * @license    https://opensource.org/licenses/osl-3.0.php  Open Software License (OSL 3.0)
+ * SPDX-FileCopyrightText: 2026 Maho <https://mahocommerce.com>
+ * SPDX-License-Identifier: OSL-3.0
+ * @package Maho_ApiPlatform
  */
+
+declare(strict_types=1);
 
 /** @var Mage_Core_Model_Resource_Setup $this */
 $installer = $this;
@@ -16,6 +14,15 @@ $installer->startSetup();
 
 $connection = $installer->getConnection();
 $tableName = $installer->getTable('api/user');
+
+// Widen api_key: the core column is varchar(40), but the salted hash produced
+// by Mage_Api_Model_User exceeds 40 chars (Postgres hard-errors SQLSTATE 22001,
+// MySQL silently truncates and corrupts the key).
+$connection->modifyColumn($tableName, 'api_key', [
+    'type'    => Maho\Db\Ddl\Table::TYPE_TEXT,
+    'length'  => 255,
+    'comment' => 'Api key',
+]);
 
 // Add client_id column if it doesn't exist
 if (!$connection->tableColumnExists($tableName, 'client_id')) {

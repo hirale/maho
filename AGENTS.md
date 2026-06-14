@@ -9,9 +9,12 @@ Maho is an open-source ecommerce platform forked from OpenMage, designed for med
 ## Essential Commands
 
 ```bash
-vendor/bin/php-cs-fixer fix        # Fix code style (lint)
-vendor/bin/phpstan analyze         # Run static analysis (level 6)
-vendor/bin/rector -c .rector.php
+composer lint                      # Run all linters (cs-fixer, rector, phpstan)
+composer lint:cs-fixer             # Code style only (dry-run)
+composer lint:rector               # Rector only (dry-run)
+composer lint:phpstan              # PHPStan only (level 6)
+vendor/bin/php-cs-fixer fix        # Apply code style fixes (writes changes)
+vendor/bin/rector -c .rector.php   # Apply rector fixes (writes changes)
 ./maho cache:flush                 # Flush all caches
 composer test                        # Run all tests (Install → Backend → Frontend)
 composer test -- --testsuite=Frontend # Run frontend tests only
@@ -148,22 +151,27 @@ All Zend Framework and Varien components have been completely removed. **NEVER**
 - CSS: use modern features, no IE/legacy browser support
 - JS AJAX: always use `mahoFetch()` instead of native `fetch()`
 - New tools/libraries: always use latest available version
-- Update PHP file headers with current year for the Maho copyright line
-- New PHP files: only Maho copyright with current year:
+- File headers use the SPDX format (see issue #939). Dual-licensed: source code (PHP, JS, CSS) under `OSL-3.0`; templates, config, and assets (PHTML, XML, HTML) under `AFL-3.0`.
+- New PHP files: a single `SPDX-FileCopyrightText` line with the current year and Maho as holder. Add a short class description on the first line ending with a period (it becomes the phpDocumentor summary); omit it if the class name is self-explanatory rather than writing filler:
 ```php
 /**
- * Maho
+ * Short class description ending with a period.
  *
- * @package    Mage_Module
- * @copyright  Copyright (c) 2026 Maho (https://mahocommerce.com)
- * @license    https://opensource.org/licenses/osl-3.0.php  Open Software License (OSL 3.0)
+ * SPDX-FileCopyrightText: 2026 Maho <https://mahocommerce.com>
+ * SPDX-License-Identifier: OSL-3.0
+ * @package Mage_Module
  */
 ```
+- The SPDX block is tight (no blank lines inside); `@package` follows it with no blank line above. The phpDocumentor CI workflow strips ` * SPDX-` lines before generating docs, leaving the canonical summary/blank/tags docblock.
+- Non-PHP new files: XML/HTML use an `<!-- ... -->` comment block, JS uses `//` line comments, CSS uses a `/* ... */` block comment (not `//`), each with `SPDX-FileCopyrightText:` and `SPDX-License-Identifier:` lines.
+- Existing files: preserve inherited Magento/OpenMage copyright lines verbatim; don't add yourself (git history is the attribution log). Update the Maho year range only on files you're already modifying. Translate an existing `@license` URL to its SPDX identifier (`osl-3.0` → `OSL-3.0`, `afl-3.0` → `AFL-3.0`) rather than reassigning by extension.
+- When a file has multiple `SPDX-FileCopyrightText` holders, order them newest-maintainer-first: Maho, then OpenMage, then Magento, then any other third-party authors (ordered by copyright year, newest first). Not every holder appears in every file; just keep the priority among those present.
+- To migrate a file's header (or a whole directory) from the legacy `@copyright`/`@license` format, use the `spdx-headers` skill.
 - Before committing, ensure translatable strings (`$this->__()` or `Mage::helper()->__()`) are in `app/locale/en_US/`
 
 ### Adding New Features
 - New modules: `app/code/core/Maho/` namespace, declared in `app/etc/modules/`
-- Follow existing module patterns; use `declare(strict_types=1)` and PHP 8.3+ features
+- Follow existing module patterns; use `declare(strict_types=1)` (placed *after* the file-level docblock, not before) and PHP 8.3+ features
 - Use `#[\Override]` attribute for overridden methods
 - When overriding admin routes in Maho modules, use `before="Mage_Adminhtml"` pattern
 

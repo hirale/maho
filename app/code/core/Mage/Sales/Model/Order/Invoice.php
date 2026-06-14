@@ -1,13 +1,11 @@
 <?php
 
 /**
- * Maho
- *
- * @package    Mage_Sales
- * @copyright  Copyright (c) 2006-2020 Magento, Inc. (https://magento.com)
- * @copyright  Copyright (c) 2017-2024 The OpenMage Contributors (https://openmage.org)
- * @copyright  Copyright (c) 2024-2026 Maho (https://mahocommerce.com)
- * @license    https://opensource.org/licenses/osl-3.0.php  Open Software License (OSL 3.0)
+ * SPDX-FileCopyrightText: 2024-2026 Maho <https://mahocommerce.com>
+ * SPDX-FileCopyrightText: 2017-2024 The OpenMage Contributors <https://openmage.org>
+ * SPDX-FileCopyrightText: 2006-2020 Magento, Inc. <https://magento.com>
+ * SPDX-License-Identifier: OSL-3.0
+ * @package Mage_Sales
  */
 
 /**
@@ -320,9 +318,11 @@ class Mage_Sales_Model_Order_Invoice extends Mage_Sales_Model_Abstract
      */
     public function canCapture()
     {
+        $payment = $this->getOrder()->getPayment();
         return $this->getState() != self::STATE_CANCELED
             && $this->getState() != self::STATE_PAID
-            && $this->getOrder()->getPayment()->canCapture();
+            && $payment !== false
+            && $payment->canCapture();
     }
 
     /**
@@ -339,7 +339,8 @@ class Mage_Sales_Model_Order_Invoice extends Mage_Sales_Model_Abstract
              * If we not retrieve negative answer from payment yet
              */
             if (is_null($canVoid)) {
-                $canVoid = $this->getOrder()->getPayment()->canVoid($this);
+                $payment = $this->getOrder()->getPayment();
+                $canVoid = $payment !== false ? $payment->canVoid($this) : false;
                 if ($canVoid === false) {
                     $this->setCanVoidFlag(false);
                     $this->_saveBeforeDestruct = true;
