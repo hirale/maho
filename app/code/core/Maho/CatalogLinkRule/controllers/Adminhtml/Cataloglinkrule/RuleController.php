@@ -16,10 +16,17 @@ class Maho_CatalogLinkRule_Adminhtml_Cataloglinkrule_RuleController extends Mage
     public function indexAction(): void
     {
         $this->loadLayout()
-            ->_setActiveMenu('cataloglinkrule/rules')
+            ->_setActiveMenu('catalog/linkrules')
             ->_title(Mage::helper('cataloglinkrule')->__('Catalog'))
             ->_title(Mage::helper('cataloglinkrule')->__('Product Relationship Rules'))
             ->renderLayout();
+    }
+
+    #[Maho\Config\Route('/admin/cataloglinkrule_rule/grid')]
+    public function gridAction(): void
+    {
+        $this->loadLayout();
+        $this->renderLayout();
     }
 
     #[Maho\Config\Route('/admin/cataloglinkrule_rule/new')]
@@ -52,7 +59,7 @@ class Maho_CatalogLinkRule_Adminhtml_Cataloglinkrule_RuleController extends Mage
         Mage::register('current_linkrule', $model);
 
         $this->loadLayout()
-            ->_setActiveMenu('cataloglinkrule/rules')
+            ->_setActiveMenu('catalog/linkrules')
             ->_title(Mage::helper('cataloglinkrule')->__('Catalog'))
             ->_title(Mage::helper('cataloglinkrule')->__('Product Relationship Rules'))
             ->_title($id ? $model->getName() : Mage::helper('cataloglinkrule')->__('New Rule'))

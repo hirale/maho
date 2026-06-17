@@ -3,7 +3,7 @@
 /**
  * SPDX-FileCopyrightText: 2026 Maho <https://mahocommerce.com>
  * SPDX-License-Identifier: OSL-3.0
- * @package Maho_SalesRule
+ * @package Mage_SalesRule
  */
 
 declare(strict_types=1);
@@ -319,7 +319,7 @@ final class CouponProcessor extends \Maho\ApiPlatform\Processor
             $quote->load($cartId);
             if ($quote->getId()) {
                 // Only the cart's owner (or a privileged caller) may preview a
-                // discount on someone else's cart — without this check, any
+                // discount on someone else's cart, without this check, any
                 // authenticated client could probe arbitrary cart totals.
                 $this->assertCanPreviewQuote($quote);
 
@@ -373,7 +373,7 @@ final class CouponProcessor extends \Maho\ApiPlatform\Processor
             return;
         }
 
-        // Guest carts can't be previewed via the numeric ID endpoint —
+        // Guest carts can't be previewed via the numeric ID endpoint,
         // mirrors CartService::verifyCartAccess(). The masked-id flow
         // is exercised through the CartProcessor coupon endpoints instead.
         throw new BadRequestHttpException('Cart not accessible');

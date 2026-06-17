@@ -77,7 +77,7 @@ describe('Idempotency listener', function (): void {
         $second = apiPost(
             '/api/rest/v2/cms-pages',
             [
-                // Different body — replay should still echo the original.
+                // Different body, replay should still echo the original.
                 'identifier' => $identifier . '-different',
                 'title' => 'Different Title',
             ],
@@ -94,7 +94,7 @@ describe('Idempotency listener', function (): void {
         $key = 'pest-anon-' . substr(uniqid(), -10);
 
         // Two unauthenticated POSTs to the same path with the same key. Both
-        // should be evaluated independently — i.e. the second must not return
+        // should be evaluated independently, i.e. the second must not return
         // the first's stored body. Because both will likely be rejected with
         // 401 before reaching any storage, the assertion is simply that the
         // listener didn't short-circuit the second with a replayed response.
@@ -112,10 +112,52 @@ describe('Idempotency listener', function (): void {
             ['X-Idempotency-Key' => $key],
         );
 
-        // Crucial: the replay header must not appear on either — anonymous
+        // Crucial: the replay header must not appear on either, anonymous
         // callers bypass storage entirely.
         expect(apiHeader($first, 'X-Idempotency-Replayed'))->toBeNull();
         expect(apiHeader($second, 'X-Idempotency-Replayed'))->toBeNull();
+    });
+
+    it('does not replay a failed (4xx) response so a corrected retry can run', function (): void {
+        $token = serviceToken(['all']);
+        $key = 'pest-4xx-' . substr(uniqid(), -10);
+
+        // First attempt: invalid body (missing identifier) → expect a 4xx.
+        $bad = apiPost(
+            '/api/rest/v2/cms-pages',
+            ['title' => 'No identifier'],
+            $token,
+            ['X-Idempotency-Key' => $key],
+        );
+
+        if ($bad['status'] < 400 || $bad['status'] >= 500) {
+            $this->markTestSkipped('cms-pages validation returned ' . $bad['status']);
+            return;
+        }
+
+        // Retry with the SAME key but a corrected body. The 4xx must not have
+        // been stored, so this executes fresh rather than replaying the failure.
+        $identifier = 'idem-4xx-' . substr(uniqid(), -8);
+        $good = apiPost(
+            '/api/rest/v2/cms-pages',
+            [
+                'identifier' => $identifier,
+                'title' => 'Corrected',
+                'content' => '<p>ok</p>',
+                'isActive' => true,
+                'stores' => ['all'],
+            ],
+            $token,
+            ['X-Idempotency-Key' => $key],
+        );
+
+        expect(apiHeader($good, 'X-Idempotency-Replayed'))->toBeNull();
+        expect(in_array($good['status'], [200, 201], true))->toBeTrue();
+
+        $createdId = $good['json']['id'] ?? null;
+        if ($createdId !== null) {
+            trackCreated('cms_page', (int) $createdId);
+        }
     });
 
 });

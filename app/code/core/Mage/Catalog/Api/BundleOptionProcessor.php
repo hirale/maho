@@ -3,7 +3,7 @@
 /**
  * SPDX-FileCopyrightText: 2026 Maho <https://mahocommerce.com>
  * SPDX-License-Identifier: OSL-3.0
- * @package Maho_Catalog
+ * @package Mage_Catalog
  */
 
 declare(strict_types=1);
@@ -89,7 +89,7 @@ final class BundleOptionProcessor extends \Maho\ApiPlatform\Processor
 
         $this->safeSave($option, 'create bundle option');
 
-        // Register product in Mage registry — Selection::_afterSave() requires it
+        // Register product in Mage registry, Selection::_afterSave() requires it
 
         if (!Mage::registry('product')) {
             Mage::register('product', $product);

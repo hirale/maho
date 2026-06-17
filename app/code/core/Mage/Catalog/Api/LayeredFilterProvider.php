@@ -3,7 +3,7 @@
 /**
  * SPDX-FileCopyrightText: 2026 Maho <https://mahocommerce.com>
  * SPDX-License-Identifier: OSL-3.0
- * @package Maho_Catalog
+ * @package Mage_Catalog
  */
 
 declare(strict_types=1);
@@ -15,7 +15,7 @@ use ApiPlatform\State\Pagination\TraversablePaginator;
 use Maho\ApiPlatform\Service\StoreContext;
 
 /**
- * Layered Filter Provider — uses Maho's built-in catalog layer to build facets
+ * Layered Filter Provider, uses Maho's built-in catalog layer to build facets
  */
 final class LayeredFilterProvider extends \Maho\ApiPlatform\Provider
 {
@@ -35,7 +35,11 @@ final class LayeredFilterProvider extends \Maho\ApiPlatform\Provider
         }
 
         $storeId = StoreContext::getStoreId();
-        $cacheKey = "api_layered_filters_{$categoryId}_{$storeId}";
+        // Facet counts vary by customer group: the catalog layer joins the
+        // group-scoped price index (Mage_Catalog_Model_Layer::addPriceData),
+        // which is why core keys its own layer state by _CUSTGROUP_ too.
+        $groupId = $this->getCustomerGroupId();
+        $cacheKey = "api_layered_filters_{$categoryId}_{$storeId}_{$groupId}";
 
         $cached = \Mage::app()->getCache()->load($cacheKey);
         if ($cached !== false) {

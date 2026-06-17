@@ -198,7 +198,7 @@ describe('GET /api/rest/v2/products - Sorting by Price', function (): void {
 describe('GET /api/rest/v2/products - Category Filtering', function (): void {
 
     it('filters products by categoryId', function (): void {
-        // Category 8 = Sale (leaf category — products have 8 in their categoryIds)
+        // Category 8 = Sale (leaf category, products have 8 in their categoryIds)
         $response = apiGet('/api/rest/v2/products?pageSize=10&categoryId=8');
 
         expect($response['status'])->toBe(200);
@@ -366,6 +366,16 @@ describe('GET /api/rest/v2/products - Price Filtering', function (): void {
             expect($price)->toBeGreaterThanOrEqual($minPrice);
             expect($price)->toBeLessThanOrEqual($maxPrice);
         }
+    });
+
+    it('rejects a sortBy field that is not allowlisted', function (): void {
+        $response = apiGet('/api/rest/v2/products?sortBy=' . urlencode('(SELECT 1)'));
+        expect($response['status'])->toBe(400);
+    });
+
+    it('accepts an allowlisted sortBy field', function (): void {
+        $response = apiGet('/api/rest/v2/products?pageSize=5&sortBy=name&sortDir=asc');
+        expect($response['status'])->toBe(200);
     });
 
 });

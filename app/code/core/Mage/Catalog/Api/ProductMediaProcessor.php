@@ -3,7 +3,7 @@
 /**
  * SPDX-FileCopyrightText: 2026 Maho <https://mahocommerce.com>
  * SPDX-License-Identifier: OSL-3.0
- * @package Maho_Catalog
+ * @package Mage_Catalog
  */
 
 declare(strict_types=1);
@@ -106,6 +106,10 @@ final class ProductMediaProcessor extends \Maho\ApiPlatform\Processor
         } else {
             throw new BadRequestHttpException('Either base64, imageData, or imageUrl is required');
         }
+
+        // The gallery backend only checks the extension; verify the bytes are
+        // actually a supported image so a renamed non-image can't be stored.
+        $this->assertImageFile($tmpPath);
 
         try {
             // Unset stock_data to prevent saving stock when we only want media
@@ -287,5 +291,19 @@ final class ProductMediaProcessor extends \Maho\ApiPlatform\Processor
         }
 
         return $ip;
+    }
+
+    /**
+     * Reject anything that isn't a supported raster image. Deletes the temp
+     * file on rejection so a failed upload leaves nothing behind.
+     */
+    private function assertImageFile(string $path): void
+    {
+        $info = @\Maho\Io::getImageSize($path);
+        $allowed = [IMAGETYPE_JPEG, IMAGETYPE_PNG, IMAGETYPE_GIF, IMAGETYPE_WEBP];
+        if ($info === false || !in_array($info[2], $allowed, true)) {
+            @unlink($path);
+            throw new BadRequestHttpException('Uploaded data is not a valid JPEG, PNG, GIF or WEBP image');
+        }
     }
 }

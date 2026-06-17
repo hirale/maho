@@ -14,17 +14,29 @@ use ApiPlatform\Metadata\Operation;
 use ApiPlatform\Metadata\CollectionOperationInterface;
 use ApiPlatform\State\Pagination\TraversablePaginator;
 use Maho\ApiPlatform\Service\StoreContext;
+use Symfony\Component\HttpKernel\Exception\BadRequestHttpException;
 
 /**
  * Product State Provider - Fetches product data for API Platform
  */
 final class ProductProvider extends \Maho\ApiPlatform\Provider
 {
+    /** Whitelist of fields the client may sort by; everything else is rejected to keep ORDER BY injection-safe. */
+    private const SORTABLE_FIELDS = ['name', 'price', 'special_price', 'created_at', 'updated_at', 'position', 'sku', 'entity_id'];
+
     private ?\Mage_Catalog_Model_Product_Media_Config $mediaConfig = null;
 
     private function getMediaConfig(): \Mage_Catalog_Model_Product_Media_Config
     {
         return $this->mediaConfig ??= \Mage::getModel('catalog/product_media_config');
+    }
+
+    /**
+     * Display currency the cached prices are converted to.
+     */
+    private function resolveCurrencyCode(): string
+    {
+        return StoreContext::getStore()->getCurrentCurrencyCode();
     }
 
     /**
@@ -74,7 +86,9 @@ final class ProductProvider extends \Maho\ApiPlatform\Provider
     private function getItem(int $id): ?Product
     {
         $storeId = StoreContext::getStoreId();
-        $cacheKey = "api_product_{$id}_{$storeId}";
+        $groupId = $this->getCustomerGroupId();
+        $currency = $this->resolveCurrencyCode();
+        $cacheKey = "api_product_{$id}_{$storeId}_{$groupId}_{$currency}";
 
         $cached = \Mage::app()->getCache()->load($cacheKey);
         if ($cached !== false) {
@@ -84,12 +98,10 @@ final class ProductProvider extends \Maho\ApiPlatform\Provider
             }
         }
 
-        $product = \Mage::getModel('catalog/product')->load($id);
-        if (!$product->getId()) {
+        $dto = $this->loadVisibleProductDto($id);
+        if ($dto === null) {
             return null;
         }
-
-        $dto = $this->toDto($product);
 
         \Mage::app()->getCache()->save(
             (string) json_encode($dto->toArray()),
@@ -115,8 +127,7 @@ final class ProductProvider extends \Maho\ApiPlatform\Provider
         // returns empty and getMediaGalleryImages() is null. Re-load by ID to
         // get the full product surface (custom options, media gallery, type
         // instance data) the detail DTO needs.
-        $product = \Mage::getModel('catalog/product')->load((int) $product->getId());
-        return $this->toDto($product);
+        return $this->loadVisibleProductDto((int) $product->getId());
     }
 
     /**
@@ -133,7 +144,30 @@ final class ProductProvider extends \Maho\ApiPlatform\Provider
         }
         // Same as getProductBySku: collection->getFirstItem() doesn't load
         // custom options or media gallery. Do a full load by id.
-        $product = \Mage::getModel('catalog/product')->load((int) $row->getId());
+        return $this->loadVisibleProductDto((int) $row->getId());
+    }
+
+    /**
+     * Full-load a product scoped to the current store and return its detail
+     * DTO, or null when it isn't enabled. Single-item lookups (by id, sku,
+     * barcode) are public reads, so they must apply the same STATUS_ENABLED
+     * filter the collection paths do, otherwise a disabled product the
+     * listing hides could be fetched by guessing its identifier.
+     */
+    private function loadVisibleProductDto(int $id): ?Product
+    {
+        $product = \Mage::getModel('catalog/product')
+            ->setStoreId(StoreContext::getStoreId())
+            ->load($id);
+        if (!$product->getId()
+            || (int) $product->getStatus() !== \Mage_Catalog_Model_Product_Status::STATUS_ENABLED
+        ) {
+            return null;
+        }
+        // Price models read the group off the product (falling back to the
+        // session, which is empty in the API), so set it explicitly to make
+        // tier, catalog-rule and final prices match the cache key's group.
+        $product->setCustomerGroupId($this->getCustomerGroupId());
         return $this->toDto($product);
     }
 
@@ -152,11 +186,12 @@ final class ProductProvider extends \Maho\ApiPlatform\Provider
     {
         $keyData = array_filter($filters, fn($v) => $v !== '' && $v !== null);
         ksort($keyData);
-        return 'api_products_' . md5(json_encode($keyData) . '_' . StoreContext::getStoreId());
+        $scope = StoreContext::getStoreId() . '_' . $this->getCustomerGroupId() . '_' . $this->resolveCurrencyCode();
+        return 'api_products_' . md5(json_encode($keyData) . '_' . $scope);
     }
 
     /**
-     * Get products by urlKey — direct DB lookup
+     * Get products by urlKey, direct DB lookup
      *
      * @return TraversablePaginator<Product>
      */
@@ -215,13 +250,13 @@ final class ProductProvider extends \Maho\ApiPlatform\Provider
             }
         }
 
-        // Handle urlKey filter — direct DB lookup, bypass search
+        // Handle urlKey filter, direct DB lookup, bypass search
         if (!empty($requestFilters['urlKey'])) {
             return $this->getByUrlKey((string) $requestFilters['urlKey'], $page, $pageSize);
         }
 
         // Use search layer for text queries, catalog layer for browsing.
-        // Use a fresh instance instead of the singleton — under FPM workers
+        // Use a fresh instance instead of the singleton, under FPM workers
         // (and in the test runner) singletons retain state across requests,
         // so the previous request's category/query would leak into this one.
         if (!empty($search)) {
@@ -247,6 +282,12 @@ final class ProductProvider extends \Maho\ApiPlatform\Provider
         $collection = $layer->getProductCollection();
         $collection->addAttributeToFilter('status', \Mage_Catalog_Model_Product_Status::STATUS_ENABLED);
 
+        // Re-target the price index to this customer group so price filters,
+        // price sorting and listing prices match the cache key's group. The
+        // layer already joined it for the session group (guest); addPriceData()
+        // is idempotent and just overrides the group on the existing join.
+        $collection->addPriceData($this->getCustomerGroupId());
+
         if (!empty($requestFilters['priceMin']) || !empty($requestFilters['priceMax'])) {
             $priceFilter = [];
             if (!empty($requestFilters['priceMin'])) {
@@ -258,7 +299,7 @@ final class ProductProvider extends \Maho\ApiPlatform\Provider
             $collection->addAttributeToFilter('price', $priceFilter);
         }
 
-        // Extract attribute filters — REST uses attr_ prefix, GraphQL uses JSON string
+        // Extract attribute filters, REST uses attr_ prefix, GraphQL uses JSON string
         $attributeFilters = [];
         if (!empty($requestFilters['attributeFilters'])) {
             $decoded = json_decode($requestFilters['attributeFilters'], true);
@@ -278,8 +319,12 @@ final class ProductProvider extends \Maho\ApiPlatform\Provider
         }
 
         if (!empty($requestFilters['sortBy'])) {
+            $sortBy = (string) $requestFilters['sortBy'];
+            if (!in_array($sortBy, self::SORTABLE_FIELDS, true)) {
+                throw new BadRequestHttpException('Invalid sortBy field. Allowed: ' . implode(', ', self::SORTABLE_FIELDS));
+            }
             $sortDir = ($requestFilters['sortDir'] ?? 'asc') === 'desc' ? 'DESC' : 'ASC';
-            $collection->setOrder($requestFilters['sortBy'], $sortDir);
+            $collection->setOrder($sortBy, $sortDir);
         } else {
             $collection->setOrder('name', 'ASC');
         }
@@ -313,11 +358,13 @@ final class ProductProvider extends \Maho\ApiPlatform\Provider
         $stockItemsByProduct = $this->batchLoadStockItems($productIds);
 
         $forListing = empty($requestFilters['fullDetail']);
+        $groupId = $this->getCustomerGroupId();
 
         $products = [];
         foreach ($result['products'] as $product) {
             if ($product instanceof \Mage_Catalog_Model_Product) {
                 $productId = (int) $product->getId();
+                $product->setCustomerGroupId($groupId);
                 $dto = Product::fromModel($product);
                 $this->enrichProduct(
                     $dto,
@@ -746,7 +793,7 @@ final class ProductProvider extends \Maho\ApiPlatform\Provider
     }
 
     /**
-     * Bundle options with selections — kept as helper due to complexity
+     * Bundle options with selections, kept as helper due to complexity
      * (dynamic vs fixed pricing, batch stock + price loading).
      */
     private function getBundleOptions(\Mage_Catalog_Model_Product $product): array

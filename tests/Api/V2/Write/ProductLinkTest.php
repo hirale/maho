@@ -18,7 +18,7 @@ afterAll(function (): void {
     cleanupTestData();
 });
 
-describe('Product Links — Permission Enforcement', function (): void {
+describe('Product Links, Permission Enforcement', function (): void {
 
     it('denies link update without authentication', function (): void {
         $productId = fixtures('product_id');
@@ -39,7 +39,7 @@ describe('Product Links — Permission Enforcement', function (): void {
 
 });
 
-describe('Product Links — CRUD Lifecycle', function (): void {
+describe('Product Links, CRUD Lifecycle', function (): void {
 
     it('adds related links, reads back, replaces, removes', function (): void {
         $token = serviceToken(['products/write', 'products/delete', 'products/read']);
@@ -113,10 +113,10 @@ describe('Product Links — CRUD Lifecycle', function (): void {
     it('supports cross_sell and up_sell types', function (): void {
         $productId = fixtures('product_id');
 
-        $crossSell = apiGet("/api/rest/v2/products/{$productId}/links/cross_sell");
+        $crossSell = apiGet("/api/rest/v2/products/{$productId}/links/cross-sell");
         expect($crossSell['status'])->toBe(200);
 
-        $upSell = apiGet("/api/rest/v2/products/{$productId}/links/up_sell");
+        $upSell = apiGet("/api/rest/v2/products/{$productId}/links/up-sell");
         expect($upSell['status'])->toBe(200);
     });
 
