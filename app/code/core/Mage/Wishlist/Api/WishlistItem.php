@@ -123,6 +123,10 @@ class WishlistItem extends CrudResource
     #[ApiProperty(writable: false, extraProperties: ['computed' => true])]
     public ?float $productPrice = null;
 
+    /** Active discounted price when the product is on sale (lower than productPrice); null otherwise. */
+    #[ApiProperty(writable: false, extraProperties: ['computed' => true])]
+    public ?float $specialPrice = null;
+
     #[ApiProperty(writable: false, extraProperties: ['computed' => true])]
     public ?string $productImageUrl = null;
 
@@ -151,7 +155,14 @@ class WishlistItem extends CrudResource
 
         $dto->productName = $product->getName();
         $dto->productSku = $product->getSku();
-        $dto->productPrice = (float) $product->getFinalPrice();
+        // productPrice = regular price; specialPrice = the active discounted price when lower
+        // (date/catalog-rule aware via getFinalPrice), mirroring the catalog product card so the
+        // wishlist renders the same price + sale badge. Falls back to final price when the regular
+        // price is unavailable (e.g. configurable parents priced on their children).
+        $regularPrice = (float) $product->getPrice();
+        $finalPrice = (float) $product->getFinalPrice();
+        $dto->productPrice = $regularPrice > 0.0 ? $regularPrice : $finalPrice;
+        $dto->specialPrice = ($finalPrice > 0.0 && $finalPrice < $dto->productPrice) ? $finalPrice : null;
         $dto->productImageUrl = self::getProductImageUrl($product);
         $dto->productUrl = '/' . ($product->getUrlKey() ?: $product->formatUrlKey($product->getName()));
         $dto->productType = $product->getTypeId();
