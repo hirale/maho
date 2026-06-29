@@ -12,14 +12,14 @@ namespace Mage\Sales\Api;
 
 use ApiPlatform\Metadata\CollectionOperationInterface;
 use ApiPlatform\Metadata\Operation;
-use ApiPlatform\State\Pagination\ArrayPaginator;
+use ApiPlatform\State\Pagination\TraversablePaginator;
 use Maho\ApiPlatform\CrudProvider;
 use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 
 final class CreditMemoProvider extends CrudProvider
 {
     #[\Override]
-    public function provide(Operation $operation, array $uriVariables = [], array $context = []): CreditMemo|ArrayPaginator|null
+    public function provide(Operation $operation, array $uriVariables = [], array $context = []): CreditMemo|TraversablePaginator|null
     {
         $this->requireAdminOrApiUser('Credit memo access requires admin or API access');
         $this->resourceClass = $operation->getClass();
@@ -33,8 +33,14 @@ final class CreditMemoProvider extends CrudProvider
         }
 
         if ($operation instanceof CollectionOperationInterface) {
+            // Order-scoped collection (REST /orders/{orderId}/credit-memos) when an
+            // orderId is present; otherwise the unscoped collection (GraphQL
+            // `creditMemos`) is a list-all across all orders.
             $orderId = (int) ($uriVariables['orderId'] ?? 0);
-            return $this->getCreditMemosForOrder($orderId, $context);
+            if ($orderId) {
+                return $this->getCreditMemosForOrder($orderId, $context);
+            }
+            return $this->getAllCreditMemos($context);
         }
 
         $id = (int) ($uriVariables['id'] ?? 0);
@@ -57,7 +63,7 @@ final class CreditMemoProvider extends CrudProvider
         return CreditMemo::fromModel($creditmemo);
     }
 
-    private function getCreditMemosForOrder(int $orderId, array $context): ArrayPaginator
+    private function getCreditMemosForOrder(int $orderId, array $context): TraversablePaginator
     {
         $order = \Mage::getModel('sales/order');
         $order->load($orderId);
@@ -71,14 +77,35 @@ final class CreditMemoProvider extends CrudProvider
         $collection = \Mage::getResourceModel('sales/order_creditmemo_collection');
         $collection->addFieldToFilter('order_id', $orderId);
         $collection->setOrder('created_at', 'DESC');
+        $collection->setPageSize($perPage)->setCurPage($page);
 
         $creditmemos = [];
         foreach ($collection as $creditmemo) {
             $creditmemos[] = CreditMemo::fromModel($creditmemo);
         }
 
-        $offset = ($page - 1) * $perPage;
+        return new TraversablePaginator(new \ArrayIterator($creditmemos), $page, $perPage, (int) $collection->getSize());
+    }
 
-        return new ArrayPaginator($creditmemos, $offset, $perPage);
+    /**
+     * List-all across every order, DB-paginated. Admin/API access is already
+     * enforced at the top of provide().
+     *
+     * @return TraversablePaginator<CreditMemo>
+     */
+    private function getAllCreditMemos(array $context): TraversablePaginator
+    {
+        ['page' => $page, 'pageSize' => $perPage] = $this->extractPagination($context);
+
+        $collection = \Mage::getResourceModel('sales/order_creditmemo_collection');
+        $collection->setOrder('created_at', 'DESC');
+        $collection->setPageSize($perPage)->setCurPage($page);
+
+        $creditmemos = [];
+        foreach ($collection as $creditmemo) {
+            $creditmemos[] = CreditMemo::fromModel($creditmemo);
+        }
+
+        return new TraversablePaginator(new \ArrayIterator($creditmemos), $page, $perPage, (int) $collection->getSize());
     }
 }

@@ -15,6 +15,7 @@ use Maho\Config\ApiResource;
 use ApiPlatform\Metadata\Get;
 use ApiPlatform\Metadata\GetCollection;
 use ApiPlatform\Metadata\Post;
+use ApiPlatform\Metadata\Delete;
 use ApiPlatform\Metadata\Link;
 use ApiPlatform\Metadata\GraphQl\Query;
 use ApiPlatform\Metadata\GraphQl\QueryCollection;
@@ -29,7 +30,7 @@ use Maho\ApiPlatform\CrudResource;
     operations: [
         new Get(
             uriTemplate: '/shipments/{id}',
-            security: "is_granted('ROLE_ADMIN') or is_granted('ROLE_API_USER')",
+            security: "is_granted('ROLE_ADMIN') or is_granted('shipments/read')",
             description: 'Get a shipment by ID',
         ),
         new GetCollection(
@@ -37,7 +38,7 @@ use Maho\ApiPlatform\CrudResource;
             uriVariables: [
                 'orderId' => new Link(toProperty: 'orderId'),
             ],
-            security: "is_granted('ROLE_ADMIN') or is_granted('ROLE_API_USER')",
+            security: "is_granted('ROLE_ADMIN') or is_granted('shipments/read')",
             description: 'Get shipments for an order',
         ),
         new Post(
@@ -45,26 +46,40 @@ use Maho\ApiPlatform\CrudResource;
             uriVariables: [
                 'orderId' => new Link(toProperty: 'orderId'),
             ],
-            security: "is_granted('ROLE_ADMIN') or is_granted('ROLE_API_USER')",
+            security: "is_granted('ROLE_ADMIN') or is_granted('shipments/create')",
             description: 'Create a shipment for an order',
+        ),
+        new Post(
+            uriTemplate: '/shipments/{id}/tracks',
+            name: 'add_shipment_track',
+            requirements: ['id' => '\d+'],
+            security: "is_granted('ROLE_ADMIN') or is_granted('shipments/create')",
+            description: 'Add a tracking number to an existing shipment',
+        ),
+        new Delete(
+            uriTemplate: '/shipments/{id}/tracks/{trackId}',
+            name: 'remove_shipment_track',
+            requirements: ['id' => '\d+', 'trackId' => '\d+'],
+            security: "is_granted('ROLE_ADMIN') or is_granted('shipments/create')",
+            description: 'Remove a tracking number from a shipment',
         ),
     ],
     graphQlOperations: [
         new Query(
             name: 'item_query',
             description: 'Get a shipment by ID',
-            security: "is_granted('ROLE_ADMIN') or is_granted('ROLE_API_USER')",
+            security: "is_granted('ROLE_ADMIN') or is_granted('shipments/read')",
         ),
         new QueryCollection(
             name: 'collection_query',
             description: 'Get shipments',
-            security: "is_granted('ROLE_ADMIN') or is_granted('ROLE_API_USER')",
+            security: "is_granted('ROLE_ADMIN') or is_granted('shipments/read')",
         ),
         new QueryCollection(
             name: 'orderShipments',
             args: ['orderId' => ['type' => 'Int!']],
             description: 'Get shipments for an order',
-            security: "is_granted('ROLE_ADMIN') or is_granted('ROLE_API_USER')",
+            security: "is_granted('ROLE_ADMIN') or is_granted('shipments/read')",
         ),
         new Mutation(
             name: 'createShipment',
@@ -76,7 +91,30 @@ use Maho\ApiPlatform\CrudResource;
                 'notifyCustomer' => ['type' => 'Boolean', 'description' => 'Send shipment notification email'],
             ],
             description: 'Create a shipment for an order (full or partial)',
-            security: "is_granted('ROLE_ADMIN') or is_granted('ROLE_API_USER')",
+            security: "is_granted('shipments/create')",
+        ),
+        // Names omit "Shipment": ApiPlatform appends the resource shortName, so
+        // these read as addTrackShipment / removeTrackShipment, not the stuttering
+        // addShipmentTrackShipment.
+        new Mutation(
+            name: 'addTrack',
+            args: [
+                'shipmentId' => ['type' => 'Int!'],
+                'carrierCode' => ['type' => 'String'],
+                'title' => ['type' => 'String'],
+                'trackNumber' => ['type' => 'String!'],
+            ],
+            description: 'Add a tracking number to an existing shipment',
+            security: "is_granted('ROLE_ADMIN') or is_granted('shipments/create')",
+        ),
+        new Mutation(
+            name: 'removeTrack',
+            args: [
+                'shipmentId' => ['type' => 'Int!'],
+                'trackId' => ['type' => 'Int!'],
+            ],
+            description: 'Remove a tracking number from a shipment',
+            security: "is_granted('ROLE_ADMIN') or is_granted('shipments/create')",
         ),
     ],
 )]

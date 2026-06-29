@@ -9,7 +9,7 @@
 declare(strict_types=1);
 
 /**
- * API Platform Observer
+ * API Platform Observer.
  *
  * Adds RFC 8594 deprecation headers to legacy SOAP/REST API responses
  */
@@ -41,15 +41,7 @@ class Maho_ApiPlatform_Model_Observer
         }
 
         $path = $request->getPathInfo() ?? '';
-
-        // Check if this is a legacy API request
-        $isLegacyApi = false;
-        foreach (self::LEGACY_API_PATHS as $pattern) {
-            if (str_starts_with($path, $pattern)) {
-                $isLegacyApi = true;
-                break;
-            }
-        }
+        $isLegacyApi = array_any(self::LEGACY_API_PATHS, fn($pattern) => str_starts_with($path, $pattern));
 
         if (!$isLegacyApi) {
             return;

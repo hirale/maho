@@ -35,28 +35,35 @@ use Maho\ApiPlatform\CrudResource;
         new Post(
             uriTemplate: '/cms-pages',
             processor: CmsPageProcessor::class,
-            security: "is_granted('ROLE_API_USER')",
+            security: "is_granted('ROLE_ADMIN') or is_granted('cms-pages/write')",
             description: 'Creates a new CMS page',
         ),
         new Put(
             uriTemplate: '/cms-pages/{id}',
             processor: CmsPageProcessor::class,
-            security: "is_granted('ROLE_API_USER')",
+            security: "is_granted('ROLE_ADMIN') or is_granted('cms-pages/write')",
             description: 'Updates a CMS page',
         ),
         new Delete(
             uriTemplate: '/cms-pages/{id}',
             processor: CmsPageProcessor::class,
-            security: "is_granted('ROLE_API_USER')",
+            security: "is_granted('ROLE_ADMIN') or is_granted('cms-pages/delete')",
             description: 'Deletes a CMS page',
         ),
     ],
     graphQlOperations: [
         new Query(name: 'item_query', description: 'Get a CMS page by ID', security: 'true'),
         new QueryCollection(name: 'collection_query', description: 'Get CMS pages', security: 'true'),
-        new Query(name: 'cmsPage'),
-        new QueryCollection(name: 'cmsPages'),
+        new Query(
+            security: 'true',
+            name: 'cmsPage',
+        ),
         new QueryCollection(
+            security: 'true',
+            name: 'cmsPages',
+        ),
+        new QueryCollection(
+            security: 'true',
             name: 'cmsPagesByIdentifier',
             args: ['identifier' => ['type' => 'String!']],
         ),
@@ -85,10 +92,10 @@ class CmsPage extends CrudResource
     #[ApiProperty(writable: false, extraProperties: ['computed' => true])]
     public string $status = 'enabled';
 
-    public bool $isActive = true;
+    public ?bool $isActive = null;
 
-    /** @var int[] */
-    public array $stores = [0];
+    /** @var int[]|null */
+    public ?array $stores = null;
 
     #[ApiProperty(writable: false, extraProperties: ['modelField' => 'creation_time'])]
     public ?string $createdAt = null;
@@ -102,7 +109,7 @@ class CmsPage extends CrudResource
     public static function afterLoad(self $dto, object $model): void
     {
         $dto->content = self::filterContent($dto->content ?? '');
-        $dto->status = $dto->isActive ? 'enabled' : 'disabled';
+        $dto->status = ($dto->isActive ?? false) ? 'enabled' : 'disabled';
 
         if (method_exists($model->getResource(), 'lookupStoreIds')) {
             $dto->stores = array_map('intval', $model->getResource()->lookupStoreIds($model->getId()));

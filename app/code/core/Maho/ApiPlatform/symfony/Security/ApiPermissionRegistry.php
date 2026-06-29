@@ -10,20 +10,18 @@ declare(strict_types=1);
 
 namespace Maho\ApiPlatform\Security;
 
-use GraphQL\Language\AST\FieldNode;
-use GraphQL\Language\AST\FragmentDefinitionNode;
-use GraphQL\Language\AST\FragmentSpreadNode;
-use GraphQL\Language\AST\InlineFragmentNode;
-use GraphQL\Language\AST\OperationDefinitionNode;
-use GraphQL\Language\AST\SelectionSetNode;
-use GraphQL\Language\Parser;
-
 /**
- * Central registry for API resource permissions.
+ * Central registry of API resource permissions.
  *
- * Single source of truth for resource definitions, REST path mappings,
- * and GraphQL field-to-resource resolution. Used by ApiUserVoter (REST),
- * GraphQlPermissionListener (GraphQL), and the admin role editor UI.
+ * Single source of truth for the valid `resource/operation` permission IDs and
+ * their grouping/labels, consumed by the admin role editor UI and the
+ * orphaned-rule cleanup in `Mage_Api_Model_Resource_Rules`.
+ *
+ * Authorization enforcement itself does NOT go through this class: each API
+ * Platform operation declares its required permission literally in its
+ * `security:` expression (e.g. `is_granted('products/write')`), which
+ * API Platform evaluates for both REST and GraphQL and routes to
+ * `ApiUserVoter`. This registry only describes which permission IDs exist.
  *
  * Backed by `vendor/composer/maho_api_permissions.php`, compiled at
  * `composer dump-autoload` from `#[Maho\Config\ApiResource]` attributes
@@ -45,23 +43,19 @@ class ApiPermissionRegistry
      *     resources: array<string, array{label: string, section: string, operations: array<string, string>}>,
      *     publicRead: list<string>,
      *     customerScoped: array<string, string>,
-     *     segmentMap: array<string, string>,
-     *     graphQlFieldMap: array<string, string>,
      * }|null
      */
     private static ?array $compiled = null;
 
     /**
      * Lazy-load the compiled permissions file. Returns an empty registry and logs
-     * a warning if the file is missing, the API is then effectively closed (most
-     * non-public endpoints deny), which is the safer failure mode than open-by-default.
+     * a warning if the file is missing; the role editor then simply shows no
+     * grantable permissions, which is the safe failure mode.
      *
      * @return array{
      *     resources: array<string, array{label: string, section: string, operations: array<string, string>}>,
      *     publicRead: list<string>,
      *     customerScoped: array<string, string>,
-     *     segmentMap: array<string, string>,
-     *     graphQlFieldMap: array<string, string>,
      * }
      */
     private static function load(): array
@@ -75,15 +69,13 @@ class ApiPermissionRegistry
         if (!is_file($path)) {
             \Mage::log(
                 'ApiPermissionRegistry: ' . $path . ' is missing, run `composer dump-autoload`. '
-                . 'Falling back to empty registry; API permission checks will deny most requests.',
+                . 'Falling back to empty registry; the role editor will show no grantable permissions.',
                 \Mage::LOG_WARNING,
             );
             return self::$compiled = [
                 'resources' => [],
                 'publicRead' => [],
                 'customerScoped' => [],
-                'segmentMap' => [],
-                'graphQlFieldMap' => [],
             ];
         }
 
@@ -91,18 +83,10 @@ class ApiPermissionRegistry
          *     resources: array<string, array{label: string, section: string, operations: array<string, string>}>,
          *     publicRead: list<string>,
          *     customerScoped: array<string, string>,
-         *     segmentMap: array<string, string>,
-         *     graphQlFieldMap: array<string, string>,
          * } $data */
         $data = require $path;
         return self::$compiled = $data;
     }
-
-    /**
-     * Mutation field name prefixes that map to the 'create' operation.
-     * Heuristic, not data, so it stays in the class, not in the attribute.
-     */
-    private const CREATE_PREFIXES = ['place', 'create', 'register', 'submit', 'subscribe'];
 
     /**
      * Get full resource definitions for admin UI
@@ -207,140 +191,5 @@ class ApiPermissionRegistry
         }
 
         return $grouped;
-    }
-
-    /**
-     * Resolve a REST URL path to a resource name.
-     *
-     * Splits the path into segments and returns the resource mapped by the
-     * last known segment. This correctly handles nested paths like
-     * /api/rest/v2/orders/5/shipments → 'shipments'.
-     */
-    public function resolveRestResource(string $path): ?string
-    {
-        $segmentMap = self::load()['segmentMap'];
-        $segments = explode('/', trim($path, '/'));
-        $resolved = null;
-
-        foreach ($segments as $segment) {
-            // Unmapped segments (e.g. nested 'items') are silently skipped,
-            // keeping the parent resource resolution. The compiler omits the
-            // legacy `'items' => null` sentinel because the loop already does
-            // the right thing.
-            if (isset($segmentMap[$segment])) {
-                $resolved = $segmentMap[$segment];
-            }
-        }
-
-        return $resolved;
-    }
-
-    /**
-     * Check if a resource defines a specific operation
-     */
-    public function resourceHasOperation(string $resource, string $operation): bool
-    {
-        return isset(self::load()['resources'][$resource]['operations'][$operation]);
-    }
-
-    /**
-     * Parse a GraphQL query and return required resource/operation pairs.
-     *
-     * Handles FieldNode, FragmentSpreadNode, and InlineFragmentNode to
-     * prevent permission bypass via fragment queries.
-     *
-     * @return array<string> List of permissions needed, e.g. ['products/read', 'orders/create']
-     */
-    public function resolveGraphQlPermissions(string $query): array
-    {
-        try {
-            $document = Parser::parse($query);
-        } catch (\Exception) {
-            return [];
-        }
-
-        $fieldMap = self::load()['graphQlFieldMap'];
-
-        // Build fragment map for resolving FragmentSpreadNode references
-        $fragments = [];
-        foreach ($document->definitions as $definition) {
-            if ($definition instanceof FragmentDefinitionNode) {
-                $fragments[$definition->name->value] = $definition;
-            }
-        }
-
-        $permissions = [];
-
-        foreach ($document->definitions as $definition) {
-            if (!$definition instanceof OperationDefinitionNode) {
-                continue;
-            }
-
-            $operationType = $definition->operation ?? 'query';
-            $topLevelFields = $this->collectTopLevelFields($definition->selectionSet, $fragments);
-
-            foreach ($topLevelFields as $fieldName) {
-                // Skip introspection fields
-                if (str_starts_with($fieldName, '__')) {
-                    continue;
-                }
-
-                $resource = $fieldMap[$fieldName] ?? null;
-
-                if ($operationType === 'query') {
-                    if ($resource === null) {
-                        continue;
-                    }
-                    $permissions[] = $resource . '/read';
-                } else {
-                    // Mutation. An unmapped field must fail closed: emit a
-                    // permission keyed on the raw field name that no api_user
-                    // holds and that trips the admin write block, rather than
-                    // skipping it (which would bypass enforcement entirely).
-                    $isCreate = false;
-                    foreach (self::CREATE_PREFIXES as $prefix) {
-                        if (str_starts_with(strtolower($fieldName), $prefix)) {
-                            $isCreate = true;
-                            break;
-                        }
-                    }
-                    $permissions[] = ($resource ?? $fieldName) . '/' . ($isCreate ? 'create' : 'write');
-                }
-            }
-        }
-
-        return array_unique($permissions);
-    }
-
-    /**
-     * Collect top-level field names from a selection set, resolving fragments.
-     *
-     * @param array<string, FragmentDefinitionNode> $fragments
-     * @return array<string>
-     */
-    private function collectTopLevelFields(SelectionSetNode $selectionSet, array $fragments): array
-    {
-        $fields = [];
-
-        foreach ($selectionSet->selections as $selection) {
-            if ($selection instanceof FieldNode) {
-                $fields[] = $selection->name->value;
-            } elseif ($selection instanceof FragmentSpreadNode) {
-                $fragmentName = $selection->name->value;
-                if (isset($fragments[$fragmentName])) {
-                    $fields = array_merge(
-                        $fields,
-                        $this->collectTopLevelFields($fragments[$fragmentName]->selectionSet, $fragments),
-                    );
-                }
-            } elseif ($selection instanceof InlineFragmentNode) {
-                $fields = array_merge(
-                    $fields,
-                    $this->collectTopLevelFields($selection->selectionSet, $fragments),
-                );
-            }
-        }
-
-        return $fields;
     }
 }

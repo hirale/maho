@@ -15,7 +15,7 @@ use Maho\ApiPlatform\Service\StoreContext;
 use Symfony\Bundle\SecurityBundle\Security;
 
 /**
- * Cart State Provider - Fetches cart data for API Platform
+ * Cart State Provider - Fetches cart data for API Platform.
  *
  * Overrides provide() because Cart has non-standard routing:
  * guest carts (masked ID), customer carts, and numeric ID carts
@@ -45,7 +45,7 @@ final class CartProvider extends \Maho\ApiPlatform\Provider
 
         // customerCart query, get authenticated user's active cart
         if ($operationName === 'customerCart') {
-            $customerId = $context['customer_id'] ?? $this->getAuthenticatedCustomerId();
+            $customerId = $this->getAuthenticatedCustomerId();
             if (!$customerId) {
                 return null;
             }

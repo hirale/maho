@@ -11,7 +11,7 @@ declare(strict_types=1);
 namespace Maho\ApiPlatform\Exception;
 
 /**
- * Validation Exception - 400 Bad Request
+ * Validation Exception - 400 Bad Request.
  *
  * Use when request data fails validation (missing fields, invalid format, etc.)
  */
@@ -58,12 +58,13 @@ class ValidationException extends ApiException
     /**
      * Create exception for an invalid field value
      */
-    public static function invalidValue(string $field, string $reason): self
+    public static function invalidValue(string $field, string $reason, ?\Throwable $previous = null): self
     {
         return new self(
             message: "Invalid {$field}: {$reason}",
             field: $field,
             constraint: 'Invalid',
+            previous: $previous,
         );
     }
 

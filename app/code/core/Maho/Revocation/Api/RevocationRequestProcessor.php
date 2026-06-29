@@ -79,7 +79,7 @@ final class RevocationRequestProcessor extends Processor
         }
 
         $ip = (string) \Mage::helper('core/http')->getRemoteAddr();
-        if ($ip !== '' && $helper->isIpRateLimited($ip, $order->getStore())) {
+        if ($ip !== '' && $helper->isIpRateLimited($order->getStore())) {
             throw new TooManyRequestsHttpException(3600, 'Too many requests. Please try again later.');
         }
 
@@ -134,6 +134,14 @@ final class RevocationRequestProcessor extends Processor
     private function processAdminUpdate(int $id, mixed $data): RevocationRequest
     {
         $this->requireAdminOrApiUser();
+
+        // Admin tokens are gated by ROLE_ADMIN; API-user tokens must hold the
+        // granular write permission rather than passing on role alone, so a
+        // read-only API key cannot change processing status or admin notes.
+        $user = $this->getAuthorizedUser();
+        if ($user->isApiUser()) {
+            $this->requirePermission($user, 'revocation-requests/write');
+        }
 
         $model = \Mage::getModel('revocation/request')->load($id);
         if (!$model->getId()) {

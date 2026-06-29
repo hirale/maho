@@ -20,13 +20,16 @@ use Mage_Catalog_Model_Product_Visibility;
 use Mage_CatalogInventory_Model_Stock_Item;
 use Maho\ApiPlatform\Security\ApiUser;
 use Maho\ApiPlatform\Trait\ActivityLogTrait;
+use Maho\ApiPlatform\Trait\ProductLoaderTrait;
+use Maho\ApiPlatform\Trait\StockWriterTrait;
 use Maho\ApiPlatform\Service\StoreContext;
+use Symfony\Component\HttpKernel\Exception\AccessDeniedHttpException;
 use Symfony\Component\HttpKernel\Exception\BadRequestHttpException;
 use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 use Symfony\Component\HttpKernel\Exception\UnprocessableEntityHttpException;
 
 /**
- * Product State Processor
+ * Product State Processor.
  *
  * Handles create, update, and delete operations for products.
  * Requires JWT authentication with products/write or products/delete permission.
@@ -38,6 +41,8 @@ use Symfony\Component\HttpKernel\Exception\UnprocessableEntityHttpException;
 final class ProductProcessor extends \Maho\ApiPlatform\Processor
 {
     use ActivityLogTrait;
+    use ProductLoaderTrait;
+    use StockWriterTrait;
 
     private const VISIBILITY_MAP = [
         'not_visible' => Mage_Catalog_Model_Product_Visibility::VISIBILITY_NOT_VISIBLE,
@@ -92,19 +97,20 @@ final class ProductProcessor extends \Maho\ApiPlatform\Processor
             'sku' => $data->sku,
             'name' => $data->name,
             'type_id' => $data->type ?: Mage_Catalog_Model_Product_Type::TYPE_SIMPLE,
-            'attribute_set_id' => (int) Mage::getModel('catalog/product')->getDefaultAttributeSetId(),
+            'attribute_set_id' => $data->attributeSetId ?: (int) Mage::getModel('catalog/product')->getDefaultAttributeSetId(),
             'status' => ($data->isActive ?? true)
                 ? Mage_Catalog_Model_Product_Status::STATUS_ENABLED
                 : Mage_Catalog_Model_Product_Status::STATUS_DISABLED,
             'visibility' => $data->visibility !== null
                 ? (self::VISIBILITY_MAP[$data->visibility] ?? Mage_Catalog_Model_Product_Visibility::VISIBILITY_BOTH)
                 : Mage_Catalog_Model_Product_Visibility::VISIBILITY_BOTH,
-            'tax_class_id' => 0,
+            'tax_class_id' => $data->taxClassId ?? 0,
         ]);
 
         $this->applyProductData($product, $data);
 
-        $websiteIds = $data->websiteIds ?? $this->getDefaultWebsiteIds();
+        $websiteIds = $data->websiteIds ?? $this->getDefaultWebsiteIds($user);
+        $this->validateSubmittedWebsiteIds($websiteIds, $user);
         $product->setWebsiteIds($websiteIds);
 
         $this->safeSave($product, 'create product');
@@ -138,6 +144,8 @@ final class ProductProcessor extends \Maho\ApiPlatform\Processor
             throw new NotFoundHttpException('Product not found');
         }
 
+        $this->authorizeProductWebsites($product, $user);
+
         $oldData = $product->getData();
 
         if ($data->name !== '') {
@@ -161,9 +169,17 @@ final class ProductProcessor extends \Maho\ApiPlatform\Processor
             );
         }
 
+        if ($data->attributeSetId !== null) {
+            $product->setAttributeSetId($data->attributeSetId);
+        }
+        if ($data->taxClassId !== null) {
+            $product->setTaxClassId($data->taxClassId);
+        }
+
         $this->applyProductData($product, $data);
 
         if ($data->websiteIds !== null) {
+            $this->validateSubmittedWebsiteIds($data->websiteIds, $user);
             $product->setWebsiteIds($data->websiteIds);
         }
 
@@ -200,6 +216,14 @@ final class ProductProcessor extends \Maho\ApiPlatform\Processor
 
         if (!$product->getId()) {
             throw new NotFoundHttpException('Product not found');
+        }
+
+        $this->authorizeProductWebsites($product, $user);
+
+        // A store-restricted user may only write attribute values into a store
+        // they're allowed to (storeId 0 = admin/default scope = all stores).
+        if ($storeId && $user->getAllowedStoreIds() !== null && !$user->canAccessStore($storeId)) {
+            throw new AccessDeniedHttpException("Access denied for store: {$storeId}");
         }
 
         $oldData = $product->getData();
@@ -285,6 +309,7 @@ final class ProductProcessor extends \Maho\ApiPlatform\Processor
 
         // Website IDs still use model (infrequent, complex)
         if ($data->websiteIds !== null) {
+            $this->validateSubmittedWebsiteIds($data->websiteIds, $user);
             $product->setWebsiteIds($data->websiteIds);
             $product->save();
         }
@@ -303,6 +328,8 @@ final class ProductProcessor extends \Maho\ApiPlatform\Processor
         if (!$product->getId()) {
             throw new NotFoundHttpException('Product not found');
         }
+
+        $this->authorizeProductWebsites($product, $user);
 
         $oldData = $product->getData();
 
@@ -349,6 +376,51 @@ final class ProductProcessor extends \Maho\ApiPlatform\Processor
         if ($data->pageLayout !== null) {
             $product->setData('page_layout', $data->pageLayout);
         }
+        if (!empty($data->customAttributesWrite)) {
+            $this->applyCustomAttributes($product, $data->customAttributesWrite);
+        }
+    }
+
+    /**
+     * Codes handled by dedicated DTO fields (or otherwise protected). They must
+     * never be written through the generic customAttributesWrite bag.
+     */
+    private const PROTECTED_ATTRIBUTE_CODES = [
+        'entity_id', 'type_id', 'sku', 'attribute_set_id', 'tax_class_id',
+        'website_ids', 'stock_data', 'status', 'visibility',
+        'created_at', 'updated_at', 'entity_type_id',
+    ];
+
+    /**
+     * Apply arbitrary EAV attribute values supplied via customAttributesWrite.
+     *
+     * Protected/system codes are rejected outright; unknown codes (not real
+     * catalog_product EAV attributes) are skipped silently so a typo can't
+     * inject an arbitrary column.
+     *
+     * @param array<string, mixed> $attributes
+     */
+    private function applyCustomAttributes(Mage_Catalog_Model_Product $product, array $attributes): void
+    {
+        $eavConfig = Mage::getSingleton('eav/config');
+
+        foreach ($attributes as $code => $value) {
+            $code = (string) $code;
+
+            if (in_array($code, self::PROTECTED_ATTRIBUTE_CODES, true)) {
+                throw new BadRequestHttpException(
+                    "Attribute '{$code}' cannot be set via customAttributes; use the dedicated field.",
+                );
+            }
+
+            $attribute = $eavConfig->getAttribute(Mage_Catalog_Model_Product::ENTITY, $code);
+            if (!$attribute || !$attribute->getId()) {
+                // Unknown attribute, skip silently.
+                continue;
+            }
+
+            $product->setData($code, $value);
+        }
     }
 
     private function assignCategories(Mage_Catalog_Model_Product $product, array $categoryIds): void
@@ -358,14 +430,25 @@ final class ProductProcessor extends \Maho\ApiPlatform\Processor
         $this->safeSave($product, 'assign categories');
     }
 
-    private function updateStockData(Mage_Catalog_Model_Product $product, Product $data): void
+    /**
+     * Resolve the stock qty / availability / manage-stock the caller supplied,
+     * coalescing the structured stockData map and the flat stockQty shortcut.
+     * Returns null when the request carries no stock change to apply (matching
+     * the original early-return: only manage_stock with no qty/availability is
+     * treated as "nothing to do").
+     *
+     * @return array{qty: ?float, isInStock: ?bool, manageStock: ?bool}|null
+     */
+    private function extractStockInput(Product $data): ?array
     {
         $qty = null;
         $isInStock = null;
+        $manageStock = null;
 
         if ($data->stockData !== null) {
             $qty = isset($data->stockData['qty']) ? (float) $data->stockData['qty'] : null;
             $isInStock = isset($data->stockData['is_in_stock']) ? (bool) $data->stockData['is_in_stock'] : null;
+            $manageStock = isset($data->stockData['manage_stock']) ? (bool) $data->stockData['manage_stock'] : null;
         }
 
         if ($qty === null && $data->stockQty !== null) {
@@ -373,32 +456,47 @@ final class ProductProcessor extends \Maho\ApiPlatform\Processor
         }
 
         if ($qty === null && $isInStock === null) {
+            return null;
+        }
+
+        return ['qty' => $qty, 'isInStock' => $isInStock, 'manageStock' => $manageStock];
+    }
+
+    private function updateStockData(Mage_Catalog_Model_Product $product, Product $data): void
+    {
+        $input = $this->extractStockInput($data);
+        if ($input === null) {
             return;
         }
+        ['qty' => $qty, 'isInStock' => $isInStock, 'manageStock' => $manageStock] = $input;
 
         /** @var Mage_CatalogInventory_Model_Stock_Item $stockItem */
         $stockItem = Mage::getModel('cataloginventory/stock_item')->loadByProduct($product);
 
-        if (!$stockItem->getId()) {
+        $isNew = !$stockItem->getId();
+        if ($isNew) {
             $stockItem->setProductId($product->getId());
             $stockItem->setStockId(1);
         }
 
         if ($qty !== null) {
-            if ($qty < 0 || $qty > 99999999) {
-                throw new BadRequestHttpException('Invalid stock quantity');
-            }
+            $this->validateStockQty($qty);
             $stockItem->setQty($qty);
-            if ($isInStock === null) {
-                $isInStock = $qty > 0;
-            }
+            $isInStock ??= $qty > 0;
         }
 
         if ($isInStock !== null) {
             $stockItem->setIsInStock($isInStock ? 1 : 0);
         }
 
-        $stockItem->setManageStock(1);
+        // Only touch manage_stock when the caller explicitly provides it; otherwise
+        // preserve the existing setting and default to enabled only for new items.
+        if ($manageStock !== null) {
+            $stockItem->setManageStock($manageStock ? 1 : 0);
+        } elseif ($isNew) {
+            $stockItem->setManageStock(1);
+        }
+
         $this->safeSave($stockItem, 'update stock');
     }
 
@@ -407,52 +505,18 @@ final class ProductProcessor extends \Maho\ApiPlatform\Processor
      */
     private function updateStockDirect(int $productId, Product $data): void
     {
-        $qty = null;
-        $isInStock = null;
-
-        if ($data->stockData !== null) {
-            $qty = isset($data->stockData['qty']) ? (float) $data->stockData['qty'] : null;
-            $isInStock = isset($data->stockData['is_in_stock']) ? (bool) $data->stockData['is_in_stock'] : null;
-        }
-
-        if ($qty === null && $data->stockQty !== null) {
-            $qty = $data->stockQty;
-        }
-
-        if ($qty === null && $isInStock === null) {
+        $input = $this->extractStockInput($data);
+        if ($input === null) {
             return;
         }
+        ['qty' => $qty, 'isInStock' => $isInStock, 'manageStock' => $manageStock] = $input;
 
-        $resource = Mage::getSingleton('core/resource');
-        $write = $resource->getConnection('core_write');
-        $table = $resource->getTableName('cataloginventory/stock_item');
-
-        $stockData = ['manage_stock' => 1];
         if ($qty !== null) {
-            if ($qty < 0 || $qty > 99999999) {
-                throw new BadRequestHttpException('Invalid stock quantity');
-            }
-            $stockData['qty'] = $qty;
-            if ($isInStock === null) {
-                $isInStock = $qty > 0;
-            }
-        }
-        if ($isInStock !== null) {
-            $stockData['is_in_stock'] = $isInStock ? 1 : 0;
+            $this->validateStockQty($qty);
         }
 
-        $stockItemId = $write->fetchOne(
-            "SELECT item_id FROM {$table} WHERE product_id = ? AND stock_id = 1",
-            [$productId],
-        );
-
-        if ($stockItemId) {
-            $write->update($table, $stockData, 'item_id = ' . (int) $stockItemId);
-        } else {
-            $stockData['product_id'] = $productId;
-            $stockData['stock_id'] = 1;
-            $write->insert($table, $stockData);
-        }
+        $stockData = $this->buildStockData($qty, $isInStock, $manageStock);
+        $this->upsertStockItemRow($productId, $stockData);
     }
 
     /**
@@ -493,12 +557,51 @@ final class ProductProcessor extends \Maho\ApiPlatform\Processor
 
 
     /**
+     * Default website assignment when the request omits websiteIds.
+     *
+     * For an unrestricted user this mirrors core behaviour (current store's
+     * website, falling back to website 1). For a store-restricted user we never
+     * broaden beyond the websites they're allowed: we scope the default to the
+     * allowed websites so a missing websiteIds can't silently assign a product
+     * to a website outside the user's scope.
+     *
      * @return int[]
      */
-    private function getDefaultWebsiteIds(): array
+    private function getDefaultWebsiteIds(ApiUser $user): array
     {
+        $allowedWebsiteIds = $this->getAllowedWebsiteIds($user);
+
         $websiteId = (int) Mage::app()->getStore()->getWebsiteId();
-        return $websiteId ? [$websiteId] : [1];
+        $defaults = $websiteId ? [$websiteId] : [1];
+
+        if ($allowedWebsiteIds === null) {
+            return $defaults;
+        }
+
+        // Keep only defaults inside the allowed set; if none qualify, fall back
+        // to the full allowed set so the product lands in the user's scope.
+        $scoped = array_values(array_intersect($defaults, $allowedWebsiteIds));
+        return $scoped !== [] ? $scoped : $allowedWebsiteIds;
+    }
+
+    /**
+     * Reject submitted website IDs that fall outside a store-restricted user's
+     * allowed websites. No-op for unrestricted users.
+     *
+     * @param int[] $websiteIds
+     */
+    private function validateSubmittedWebsiteIds(array $websiteIds, ApiUser $user): void
+    {
+        $allowedWebsiteIds = $this->getAllowedWebsiteIds($user);
+        if ($allowedWebsiteIds === null) {
+            return;
+        }
+
+        foreach ($websiteIds as $websiteId) {
+            if (!in_array((int) $websiteId, $allowedWebsiteIds, true)) {
+                throw new AccessDeniedHttpException("Access denied for website: {$websiteId}");
+            }
+        }
     }
 
     private function invalidateCache(int $productId): void
@@ -516,6 +619,8 @@ final class ProductProcessor extends \Maho\ApiPlatform\Processor
         // not whatever the client did or didn't send.
         $data->isActive = $data->status === 'enabled';
         $data->visibility = array_search((int) $product->getVisibility(), self::VISIBILITY_MAP, true) ?: 'catalog_search';
+        $data->attributeSetId = $product->getAttributeSetId() !== null ? (int) $product->getAttributeSetId() : null;
+        $data->taxClassId = $product->getTaxClassId() !== null ? (int) $product->getTaxClassId() : null;
         $data->createdAt = $product->getCreatedAt();
         $data->updatedAt = $product->getUpdatedAt();
         return $data;

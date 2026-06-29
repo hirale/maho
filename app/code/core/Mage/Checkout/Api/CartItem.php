@@ -11,7 +11,7 @@ declare(strict_types=1);
 namespace Mage\Checkout\Api;
 
 /**
- * CartItem DTO - Data transfer object for cart line items
+ * CartItem DTO - Data transfer object for cart line items.
  */
 
 class CartItem extends \Maho\ApiPlatform\Resource
@@ -41,14 +41,14 @@ class CartItem extends \Maho\ApiPlatform\Resource
     public array $options = [];
 
     /**
-     * Fulfillment type for this item: SHIP (default) or PICKUP
-     * Used for omnichannel scenarios (BOPIS, POS in-store pickup, etc.)
-     */
-    public string $fulfillmentType = 'SHIP';
-
-    /**
      * Stock status: 'in_stock' or 'out_of_stock'
      */
     public string $stockStatus = 'in_stock';
+
+    /**
+     * Item-level gift message, or null when none is set.
+     * @var array{sender: string, recipient: string, message: string}|null
+     */
+    public ?array $giftMessage = null;
 
 }

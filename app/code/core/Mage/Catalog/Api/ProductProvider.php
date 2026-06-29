@@ -17,7 +17,7 @@ use Maho\ApiPlatform\Service\StoreContext;
 use Symfony\Component\HttpKernel\Exception\BadRequestHttpException;
 
 /**
- * Product State Provider - Fetches product data for API Platform
+ * Product State Provider - Fetches product data for API Platform.
  */
 final class ProductProvider extends \Maho\ApiPlatform\Provider
 {
@@ -92,19 +92,19 @@ final class ProductProvider extends \Maho\ApiPlatform\Provider
 
         $cached = \Mage::app()->getCache()->load($cacheKey);
         if ($cached !== false) {
-            $data = json_decode($cached, true);
+            $data = \Mage::helper('core')->jsonDecode($cached, true);
             if ($data !== null) {
                 return Product::fromArray($data);
             }
         }
 
-        $dto = $this->loadVisibleProductDto($id);
+        $dto = $this->loadProductDto($id);
         if ($dto === null) {
             return null;
         }
 
         \Mage::app()->getCache()->save(
-            (string) json_encode($dto->toArray()),
+            (string) \Mage::helper('core')->jsonEncode($dto->toArray()),
             $cacheKey,
             ['API_PRODUCTS', "API_PRODUCT_{$id}"],
             $this->getCacheTtl(),
@@ -116,7 +116,7 @@ final class ProductProvider extends \Maho\ApiPlatform\Provider
     /**
      * Get a product by SKU
      */
-    private function getProductBySku(string $sku): ?Product
+    public function getProductBySku(string $sku, bool $visibleOnly = true): ?Product
     {
         $product = \Mage::getModel('catalog/product')->loadByAttribute('sku', $sku);
         if (!$product instanceof \Mage_Catalog_Model_Product || !$product->getId()) {
@@ -127,13 +127,13 @@ final class ProductProvider extends \Maho\ApiPlatform\Provider
         // returns empty and getMediaGalleryImages() is null. Re-load by ID to
         // get the full product surface (custom options, media gallery, type
         // instance data) the detail DTO needs.
-        return $this->loadVisibleProductDto((int) $product->getId());
+        return $this->loadProductDto((int) $product->getId(), $visibleOnly);
     }
 
     /**
      * Get a product by barcode
      */
-    private function getProductByBarcode(string $barcode): ?Product
+    public function getProductByBarcode(string $barcode, bool $visibleOnly = true): ?Product
     {
         $row = \Mage::getModel('catalog/product')
             ->getCollection()
@@ -144,24 +144,26 @@ final class ProductProvider extends \Maho\ApiPlatform\Provider
         }
         // Same as getProductBySku: collection->getFirstItem() doesn't load
         // custom options or media gallery. Do a full load by id.
-        return $this->loadVisibleProductDto((int) $row->getId());
+        return $this->loadProductDto((int) $row->getId(), $visibleOnly);
     }
 
     /**
-     * Full-load a product scoped to the current store and return its detail
-     * DTO, or null when it isn't enabled. Single-item lookups (by id, sku,
-     * barcode) are public reads, so they must apply the same STATUS_ENABLED
-     * filter the collection paths do, otherwise a disabled product the
-     * listing hides could be fetched by guessing its identifier.
+     * Full-load a product scoped to the current store and return its detail DTO.
+     *
+     * Single-item public reads (by id, sku, barcode) pass $visibleOnly = true so
+     * a disabled product the listing hides can't be fetched by guessing its
+     * identifier. The admin GraphQL endpoint passes false, as admins must be able
+     * to load disabled products too.
      */
-    private function loadVisibleProductDto(int $id): ?Product
+    public function loadProductDto(int $id, bool $visibleOnly = true): ?Product
     {
         $product = \Mage::getModel('catalog/product')
             ->setStoreId(StoreContext::getStoreId())
             ->load($id);
-        if (!$product->getId()
-            || (int) $product->getStatus() !== \Mage_Catalog_Model_Product_Status::STATUS_ENABLED
-        ) {
+        if (!$product->getId()) {
+            return null;
+        }
+        if ($visibleOnly && (int) $product->getStatus() !== \Mage_Catalog_Model_Product_Status::STATUS_ENABLED) {
             return null;
         }
         // Price models read the group off the product (falling back to the
@@ -187,7 +189,7 @@ final class ProductProvider extends \Maho\ApiPlatform\Provider
         $keyData = array_filter($filters, fn($v) => $v !== '' && $v !== null);
         ksort($keyData);
         $scope = StoreContext::getStoreId() . '_' . $this->getCustomerGroupId() . '_' . $this->resolveCurrencyCode();
-        return 'api_products_' . md5(json_encode($keyData) . '_' . $scope);
+        return 'api_products_' . md5(\Mage::helper('core')->jsonEncode($keyData) . '_' . $scope);
     }
 
     /**
@@ -204,9 +206,16 @@ final class ProductProvider extends \Maho\ApiPlatform\Provider
             ->setPageSize($pageSize)
             ->setCurPage($page);
 
-        // Sort configurables first so they take priority over simples with shared url_keys
+        // Sort composite products first so they take priority over simples with shared url_keys.
+        // ANSI CASE instead of MySQL's FIELD() so the ordering works on PostgreSQL and SQLite too.
         $collection->getSelect()->order(
-            new \Maho\Db\Expr("FIELD(e.type_id, '" . \Mage_Catalog_Model_Product_Type::TYPE_CONFIGURABLE . "', '" . \Mage_Catalog_Model_Product_Type::TYPE_GROUPED . "', '" . \Mage_Catalog_Model_Product_Type::TYPE_BUNDLE . "') DESC"),
+            new \Maho\Db\Expr(
+                'CASE e.type_id'
+                . " WHEN '" . \Mage_Catalog_Model_Product_Type::TYPE_CONFIGURABLE . "' THEN 1"
+                . " WHEN '" . \Mage_Catalog_Model_Product_Type::TYPE_GROUPED . "' THEN 2"
+                . " WHEN '" . \Mage_Catalog_Model_Product_Type::TYPE_BUNDLE . "' THEN 3"
+                . ' ELSE 0 END DESC',
+            ),
         );
 
         $storeId = StoreContext::getStoreId();
@@ -241,7 +250,7 @@ final class ProductProvider extends \Maho\ApiPlatform\Provider
             $cacheKey = $this->getCollectionCacheKey($requestFilters);
             $cached = \Mage::app()->getCache()->load($cacheKey);
             if ($cached !== false) {
-                $cachedData = json_decode($cached, true);
+                $cachedData = \Mage::helper('core')->jsonDecode($cached, true);
                 if ($cachedData !== null) {
                     // Reconstruct Product DTOs from cached data
                     $products = array_map(fn($data) => Product::fromArray($data), $cachedData['products']);
@@ -302,7 +311,11 @@ final class ProductProvider extends \Maho\ApiPlatform\Provider
         // Extract attribute filters, REST uses attr_ prefix, GraphQL uses JSON string
         $attributeFilters = [];
         if (!empty($requestFilters['attributeFilters'])) {
-            $decoded = json_decode($requestFilters['attributeFilters'], true);
+            try {
+                $decoded = \Mage::helper('core')->jsonDecode($requestFilters['attributeFilters']);
+            } catch (\JsonException) {
+                throw new BadRequestHttpException('attributeFilters must be a valid JSON object');
+            }
             if (is_array($decoded)) {
                 $attributeFilters = $decoded;
             }
@@ -389,7 +402,7 @@ final class ProductProvider extends \Maho\ApiPlatform\Provider
                 'total' => (int) $result['total'],
             ];
             \Mage::app()->getCache()->save(
-                json_encode($cacheData),
+                \Mage::helper('core')->jsonEncode($cacheData),
                 $cacheKey,
                 ['API_PRODUCTS'],
                 $this->getCacheTtl(),

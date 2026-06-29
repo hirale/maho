@@ -38,6 +38,10 @@ final class GroupedProductLinkProcessor extends \Maho\ApiPlatform\Processor
         $user = $this->getAuthorizedUser();
         $productId = (int) ($uriVariables['productId'] ?? 0);
 
+        // Enforce website scope for store-restricted API users on every
+        // sub-resource write/delete (mirrors ProductProcessor's main CRUD check).
+        $this->authorizeProductWebsites($this->loadProduct($productId), $user);
+
         if ($operation instanceof DeleteOperationInterface) {
             $this->requirePermission($user, 'products/delete');
             $childProductId = self::extractChildProductId($context);
@@ -47,7 +51,7 @@ final class GroupedProductLinkProcessor extends \Maho\ApiPlatform\Processor
         $this->requirePermission($user, 'products/write');
 
         $request = $context['request'] ?? null;
-        $body = $request ? json_decode($request->getContent(), true) : [];
+        $body = $this->parseRequestBody($request);
 
         if ($operation instanceof Post) {
             return $this->handleAdd($productId, $body);
@@ -126,6 +130,13 @@ final class GroupedProductLinkProcessor extends \Maho\ApiPlatform\Processor
 
     private function handleRemove(int $productId, int $childProductId): null
     {
+        // extractChildProductId() returns 0 when the path can't be parsed; without
+        // this guard the unset() below is a no-op and the DELETE reports success
+        // for a link it never removed. Mirrors ConfigurableSetupProcessor.
+        if ($childProductId <= 0) {
+            throw new BadRequestHttpException('childProductId is required and must be positive');
+        }
+
         $product = $this->loadProduct($productId, Mage_Catalog_Model_Product_Type::TYPE_GROUPED);
 
         $existing = $this->getExistingLinkData($product);

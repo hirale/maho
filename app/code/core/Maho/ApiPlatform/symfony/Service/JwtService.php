@@ -29,7 +29,10 @@ class JwtService
 {
     private const CONFIG_PATH_SECRET = 'apiplatform/oauth2/secret';
     private const CONFIG_PATH_TOKEN_LIFETIME = 'apiplatform/oauth2/token_lifetime';
-    private const DEFAULT_TOKEN_EXPIRY_SECONDS = 86400; // 24 hours
+    // Matches Helper_Data::DEFAULT_TOKEN_LIFETIME and the shipped config default
+    // (apiplatform/oauth2/token_lifetime). A blank config must not silently issue
+    // longer-lived tokens than the documented 1h default.
+    private const DEFAULT_TOKEN_EXPIRY_SECONDS = 3600; // 1 hour
     private const AUDIENCE = 'maho-api';
 
     private ?string $cachedSecret = null;
@@ -54,7 +57,7 @@ class JwtService
      */
     public function generateCustomerToken(\Mage_Customer_Model_Customer $customer): string
     {
-        $now = new DateTimeImmutable();
+        $now = new DateTimeImmutable('now', new \DateTimeZone('UTC'));
         $config = $this->getConfig();
 
         $token = $config->builder()
@@ -68,7 +71,7 @@ class JwtService
             ->withClaim('customer_id', (int) $customer->getId())
             ->withClaim('email', $customer->getEmail())
             ->withClaim('type', 'customer')
-            ->withClaim('roles', ['ROLE_USER'])
+            ->withClaim('roles', ['ROLE_CUSTOMER'])
             ->getToken($config->signer(), $config->signingKey());
 
         return $token->toString();
@@ -82,7 +85,7 @@ class JwtService
      */
     public function generateAdminToken(\Mage_Admin_Model_User $admin): string
     {
-        $now = new DateTimeImmutable();
+        $now = new DateTimeImmutable('now', new \DateTimeZone('UTC'));
         $config = $this->getConfig();
 
         $token = $config->builder()
@@ -111,10 +114,10 @@ class JwtService
      */
     public function generateApiUserToken(\Mage_Api_Model_User $apiUser, array $permissions = []): string
     {
-        $now = new DateTimeImmutable();
+        $now = new DateTimeImmutable('now', new \DateTimeZone('UTC'));
         $config = $this->getConfig();
 
-        $token = $config->builder()
+        $builder = $config->builder()
             ->issuedBy($this->getIssuer())
             ->permittedFor(self::AUDIENCE)
             ->identifiedBy(bin2hex(random_bytes(16)))
@@ -125,11 +128,48 @@ class JwtService
             ->withClaim('api_user_id', (int) $apiUser->getId())
             ->withClaim('username', $apiUser->getUsername())
             ->withClaim('type', 'api_user')
-            ->withClaim('roles', ['ROLE_API_USER'])
-            ->withClaim('permissions', $permissions)
-            ->getToken($config->signer(), $config->signingKey());
+            // No role claim: service accounts are authorized by their granular
+            // `resource/op` permissions, not by a role (see OAuth2Authenticator).
+            ->withClaim('roles', [])
+            ->withClaim('permissions', $permissions);
+
+        // Scope the token to the api user's allowed stores, when set. A
+        // null/empty/invalid column means "all stores" — emit no claim, so the
+        // consumer side (OAuth2Authenticator) leaves allowedStoreIds null.
+        $allowedStoreIds = $this->getApiUserAllowedStoreIds($apiUser);
+        if ($allowedStoreIds !== []) {
+            $builder = $builder->withClaim('allowed_store_ids', array_map('intval', $allowedStoreIds));
+        }
+
+        $token = $builder->getToken($config->signer(), $config->signingKey());
 
         return $token->toString();
+    }
+
+    /**
+     * Read and decode the api_user.allowed_store_ids JSON column.
+     *
+     * Returns the list of store ids the user is restricted to, or an empty
+     * array when unrestricted (null/empty column or undecodable JSON — treated
+     * conservatively as no restriction so a malformed value can't lock a user
+     * out of every store).
+     *
+     * @return array<int, mixed>
+     */
+    public function getApiUserAllowedStoreIds(\Mage_Api_Model_User $apiUser): array
+    {
+        $raw = $apiUser->getData('allowed_store_ids');
+        if (!is_string($raw) || $raw === '') {
+            return [];
+        }
+
+        try {
+            $decoded = \Mage::helper('core')->jsonDecode($raw);
+        } catch (\JsonException) {
+            return [];
+        }
+
+        return is_array($decoded) ? $decoded : [];
     }
 
     /**
@@ -170,9 +210,12 @@ class JwtService
             return ['all'];
         }
 
+        // resource_id is nullable in api/rule, so fetchCol() may return null
+        // entries. Filter to non-empty strings (a bare `static fn(string $r)`
+        // would TypeError on null under strict_types).
         return array_values(array_unique(array_filter(
             $rows,
-            static fn(string $r): bool => $r !== '',
+            static fn(mixed $r): bool => is_string($r) && $r !== '',
         )));
     }
 
@@ -205,7 +248,12 @@ class JwtService
             }),
         ];
 
-        assert($parsed instanceof \Lcobucci\JWT\Token\Plain);
+        // Hard guard rather than assert(): assertions may be disabled in
+        // production (assert.active=0), and a non-Plain (e.g. Unsecured) token
+        // must never bypass the SignedWith constraint below.
+        if (!$parsed instanceof \Lcobucci\JWT\Token\Plain) {
+            throw new \Lcobucci\JWT\Token\InvalidTokenStructure('Token is not a valid signed JWT.');
+        }
         $config->validator()->assert($parsed, ...$constraints);
 
         // Convert to stdClass for backward compatibility
@@ -322,6 +370,24 @@ class JwtService
             $secret = bin2hex(random_bytes(32));
             \Mage::getConfig()->saveConfig(self::CONFIG_PATH_SECRET, $secret);
             \Mage::app()->getCache()->cleanType('config');
+
+            // First-boot race: two concurrent workers can each generate a
+            // secret and the last saveConfig() wins in the DB. Re-read the
+            // committed value straight from core_config_data so every worker
+            // converges on the persisted secret instead of signing tokens with
+            // a local-only value that other workers would reject.
+            $resource = \Mage::getSingleton('core/resource');
+            $read = $resource->getConnection('core_read');
+            $committed = (string) $read->fetchOne(
+                $read->select()
+                    ->from($resource->getTableName('core/config_data'), ['value'])
+                    ->where('path = ?', self::CONFIG_PATH_SECRET)
+                    ->where('scope = ?', 'default')
+                    ->where('scope_id = ?', 0),
+            );
+            if ($committed !== '') {
+                $secret = $committed;
+            }
         }
 
         return $secret;

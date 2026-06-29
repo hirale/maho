@@ -17,15 +17,18 @@ use Mage\Sales\Api\OrderService;
 use Maho\ApiPlatform\Exception\NotFoundException;
 use Maho\ApiPlatform\Exception\ValidationException;
 use Maho\ApiPlatform\Security\AdminAcl;
+use Maho\ApiPlatform\Trait\AdminQuoteTrait;
 
 /**
- * Order Mutation Handler
+ * Order Mutation Handler.
  *
  * Handles all order-related GraphQL operations for admin API.
  * Extracted from AdminGraphQlController for better code organization.
  */
 class OrderMutationHandler
 {
+    use AdminQuoteTrait;
+
     private OrderService $orderService;
     private OrderProvider $orderProvider;
 
@@ -64,6 +67,14 @@ class OrderMutationHandler
             $quote->collectTotals()->save();
         }
 
+        // Reject a method the client made up: after rates are collected the
+        // chosen code must resolve to a real rate, otherwise a caller could
+        // claim e.g. free shipping that the store does not actually offer.
+        if ($shippingMethod && !$quote->isVirtual()
+            && !$quote->getShippingAddress()->getShippingRateByCode($shippingMethod)) {
+            throw ValidationException::invalidValue('shippingMethod', 'is not available for this address');
+        }
+
         $result = $this->orderService->placeAdminOrder(
             $quote,
             $variables['guestEmail'] ?? null,
@@ -80,10 +91,8 @@ class OrderMutationHandler
                 'orderId' => (int) $order->getId(),
                 'incrementId' => $order->getIncrementId(),
                 'status' => $order->getStatus(),
-                'grandTotal' => [
-                    'value' => (float) $order->getGrandTotal(),
-                    'formatted' => \Mage::helper('core')->currency($order->getGrandTotal(), true, false),
-                ],
+                'currency' => $order->getOrderCurrencyCode(),
+                'grandTotal' => (float) $order->getGrandTotal(),
             ],
             'invoice' => $invoiceAndShipment['invoice'],
             'shipment' => $invoiceAndShipment['shipment'],
@@ -102,8 +111,8 @@ class OrderMutationHandler
             throw ValidationException::requiredField('incrementId');
         }
 
-        $order = \Mage::getModel('sales/order')->loadByIncrementId($incrementId);
-        if (!$order->getId()) {
+        $order = $this->orderService->getOrder(incrementId: $incrementId);
+        if (!$order) {
             throw NotFoundException::order();
         }
 
@@ -117,28 +126,20 @@ class OrderMutationHandler
     {
         AdminAcl::checkResource(Order::class);
         $customerId = $variables['customerId'] ?? null;
-        $limit = $variables['limit'] ?? 10;
+        $limit = max(1, min((int) ($variables['limit'] ?? 10), 100));
 
         if (!$customerId) {
             throw ValidationException::requiredField('customerId');
         }
 
-        try {
-            $orders = \Mage::getModel('sales/order')->getCollection()
-                ->addFieldToFilter('customer_id', (int) $customerId)
-                ->setOrder('created_at', 'DESC')
-                ->setPageSize((int) $limit);
+        $result = $this->orderService->getCustomerOrders((int) $customerId, 1, $limit);
 
-            $result = [];
-            foreach ($orders as $order) {
-                $result[] = $this->mapOrder($order);
-            }
-
-            return ['customerOrders' => $result];
-        } catch (\Exception $e) {
-            \Mage::log('handleGetCustomerOrders error: ' . $e->getMessage() . "\n" . $e->getTraceAsString(), \Mage::LOG_ERROR, 'api.log');
-            throw $e;
+        $orders = [];
+        foreach ($result['orders'] as $order) {
+            $orders[] = $this->mapOrder($order);
         }
+
+        return ['customerOrders' => $orders];
     }
 
     /**
@@ -148,27 +149,16 @@ class OrderMutationHandler
     {
         AdminAcl::checkResource(Order::class);
         $storeId = $variables['storeId'] ?? null;
-        $limit = $variables['limit'] ?? 10;
+        $limit = max(1, min((int) ($variables['limit'] ?? 10), 100));
 
-        try {
-            $orders = \Mage::getModel('sales/order')->getCollection()
-                ->setOrder('created_at', 'DESC')
-                ->setPageSize((int) $limit);
+        $orders = $this->orderService->getRecentOrders($limit, $storeId ? (int) $storeId : null);
 
-            if ($storeId) {
-                $orders->addFieldToFilter('store_id', (int) $storeId);
-            }
-
-            $result = [];
-            foreach ($orders as $order) {
-                $result[] = $this->mapOrderSummary($order);
-            }
-
-            return ['recentOrders' => $result];
-        } catch (\Exception $e) {
-            \Mage::log('handleRecentOrders error: ' . $e->getMessage(), \Mage::LOG_ERROR, 'api.log');
-            throw $e;
+        $result = [];
+        foreach ($orders as $order) {
+            $result[] = $this->mapOrderSummary($order);
         }
+
+        return ['recentOrders' => $result];
     }
 
     /**
@@ -179,43 +169,20 @@ class OrderMutationHandler
         AdminAcl::checkResource(Order::class);
         $search = $variables['search'] ?? null;
         $storeId = $variables['storeId'] ?? null;
-        $limit = $variables['limit'] ?? 10;
+        $limit = max(1, min((int) ($variables['limit'] ?? 10), 100));
 
         if (!$search) {
             return ['searchOrders' => []];
         }
 
-        try {
-            $orders = \Mage::getModel('sales/order')->getCollection()
-                ->setOrder('created_at', 'DESC')
-                ->setPageSize((int) $limit);
+        $orders = $this->orderService->searchOrders($search, $storeId ? (int) $storeId : null, $limit);
 
-            if ($storeId) {
-                $orders->addFieldToFilter('store_id', (int) $storeId);
-            }
-
-            // Search by increment ID or customer name/email (OR condition)
-            $escapedSearch = addcslashes($search, '%_');
-            $orders->addFieldToFilter(
-                ['increment_id', 'customer_email', 'customer_firstname', 'customer_lastname'],
-                [
-                    ['like' => "%{$escapedSearch}%"],
-                    ['like' => "%{$escapedSearch}%"],
-                    ['like' => "%{$escapedSearch}%"],
-                    ['like' => "%{$escapedSearch}%"],
-                ],
-            );
-
-            $result = [];
-            foreach ($orders as $order) {
-                $result[] = $this->mapOrderSummary($order);
-            }
-
-            return ['searchOrders' => $result];
-        } catch (\Exception $e) {
-            \Mage::log('handleSearchOrders error: ' . $e->getMessage(), \Mage::LOG_ERROR, 'api.log');
-            throw $e;
+        $result = [];
+        foreach ($orders as $order) {
+            $result[] = $this->mapOrderSummary($order);
         }
+
+        return ['searchOrders' => $result];
     }
 
     /**
@@ -243,10 +210,45 @@ class OrderMutationHandler
             throw NotFoundException::order();
         }
 
-        if (!$order->canCreditmemo()) {
-            throw ValidationException::invalidValue('orderId', 'cannot create credit memo for this order');
+        // Serialize concurrent refunds on the same order so two requests can't
+        // both pass canCreditmemo() and both register(), double-refunding.
+        // Mirrors OrderService::placeAdminOrder() and CreditMemoProcessor.
+        $resource = \Mage::getSingleton('core/resource');
+        $write = $resource->getConnection('core_write');
+        // Shared per-order lock so refunds are mutually exclusive with the
+        // order's other state transitions (invoice/ship/cancel). Matches
+        // OrderService::withOrderLock() and CreditMemoProcessor.
+        $lockName = 'maho_order_mutate:' . (int) $order->getId();
+        if (!$write->getLock($lockName, 5)) {
+            throw ValidationException::invalidValue('orderId', 'a refund is already in progress for this order');
         }
 
+        try {
+            // Re-read the order under the lock so canCreditmemo() sees the live
+            // total_refunded, not a value another request changed while waiting.
+            $order->load($orderId);
+            if (!$order->canCreditmemo()) {
+                throw ValidationException::invalidValue('orderId', 'cannot create credit memo for this order');
+            }
+
+            return $this->buildProcessReturn($order, $items, $comment, $adjustmentPositive, $adjustmentNegative, $refundToStoreCredit);
+        } finally {
+            $write->releaseLock($lockName);
+        }
+    }
+
+    /**
+     * @param array<int, array<string, mixed>> $items
+     * @return array<string, mixed>
+     */
+    private function buildProcessReturn(
+        \Mage_Sales_Model_Order $order,
+        array $items,
+        ?string $comment,
+        float $adjustmentPositive,
+        float $adjustmentNegative,
+        bool $refundToStoreCredit,
+    ): array {
         // Build credit memo data
         $creditmemoData = [
             'qtys' => [],
@@ -281,7 +283,9 @@ class OrderMutationHandler
                 $creditmemo->setPaymentRefundDisallowed(1.0);
             }
 
-            $creditmemo->addComment($comment, false);
+            if ($comment !== null && $comment !== '') {
+                $creditmemo->addComment($comment, false);
+            }
 
             // Register and save credit memo
             $creditmemo->register();
@@ -305,31 +309,18 @@ class OrderMutationHandler
                 'creditmemo' => [
                     'id' => (int) $creditmemo->getId(),
                     'incrementId' => $creditmemo->getIncrementId(),
-                    'grandTotal' => [
-                        'value' => (float) $creditmemo->getGrandTotal(),
-                        'formatted' => \Mage::helper('core')->currency($creditmemo->getGrandTotal(), true, false),
-                    ],
+                    'currency' => $creditmemo->getOrderCurrencyCode(),
+                    'grandTotal' => (float) $creditmemo->getGrandTotal(),
                     'createdAt' => $creditmemo->getCreatedAt(),
                 ],
                 'order' => $this->mapOrder($order->load($order->getId())),
             ]];
         } catch (\Exception $e) {
             \Mage::logException($e);
-            throw ValidationException::invalidValue('return', 'failed to process: ' . $e->getMessage());
+            throw ValidationException::invalidValue('return', 'failed to process the return', $e);
         }
     }
 
-    /**
-     * Load a quote by ID without store filtering, for admin context
-     */
-    private function loadAdminQuote(int $cartId): \Mage_Sales_Model_Quote
-    {
-        $quote = \Mage::getModel('sales/quote')->loadByIdWithoutStore($cartId);
-        if (!$quote || !$quote->getId()) {
-            throw NotFoundException::cart();
-        }
-        return $quote;
-    }
 
     /**
      * Create invoice and shipment for an order, logging any failures
@@ -398,10 +389,8 @@ class OrderMutationHandler
             'status' => $order->getStatus(),
             'customerName' => $customerName,
             'createdAt' => \Mage::helper('core')->formatDate($order->getCreatedAt(), 'medium', true),
-            'grandTotal' => [
-                'value' => (float) $order->getGrandTotal(),
-                'formatted' => \Mage::helper('core')->currency($order->getGrandTotal(), true, false),
-            ],
+            'currency' => $order->getOrderCurrencyCode(),
+            'grandTotal' => (float) $order->getGrandTotal(),
             'items' => $items,
         ];
     }
@@ -416,13 +405,14 @@ class OrderMutationHandler
         $dto = $this->orderProvider->mapToDto($order);
         $data = $dto->toArray();
 
-        // Reshape money fields into {value, formatted} for GraphQL
-        $data['grandTotal'] = $this->formatMoney($order->getGrandTotal());
-        $data['subtotal'] = $this->formatMoney($order->getSubtotal());
-        $data['taxAmount'] = $this->formatMoney($order->getTaxAmount());
-        $data['shippingAmount'] = $this->formatMoney($order->getShippingAmount());
-        $data['discountAmount'] = $this->formatMoney(abs((float) $order->getDiscountAmount()));
-        $data['totalRefunded'] = $this->formatMoney($order->getTotalRefunded() ?? 0);
+        // Money fields are plain numbers; $data['currency'] (from the Order DTO)
+        // names the currency once for the whole response.
+        $data['grandTotal'] = (float) $order->getGrandTotal();
+        $data['subtotal'] = (float) $order->getSubtotal();
+        $data['taxAmount'] = (float) $order->getTaxAmount();
+        $data['shippingAmount'] = (float) $order->getShippingAmount();
+        $data['discountAmount'] = abs((float) $order->getDiscountAmount());
+        $data['totalRefunded'] = (float) ($order->getTotalRefunded() ?? 0);
 
         // Add GraphQL-specific computed fields
         $data['canRefund'] = $order->canCreditmemo();
@@ -443,14 +433,5 @@ class OrderMutationHandler
         unset($itemData);
 
         return $data;
-    }
-
-    private function formatMoney(float|string|null $amount): array
-    {
-        $value = (float) ($amount ?? 0);
-        return [
-            'value' => $value,
-            'formatted' => \Mage::helper('core')->currency($value, true, false),
-        ];
     }
 }

@@ -19,10 +19,10 @@ use Symfony\Component\Security\Core\Authentication\Token\Storage\TokenStorageInt
 
 /**
  * Validates the user's right to operate in the store switched in by
- * StoreContextListener. Runs at priority 6, after the firewall (8) and
- * GraphQlPermissionListener (7), so the security token is populated.
+ * StoreContextListener. Runs at priority 6, after the firewall (8), so the
+ * security token is populated.
  *
- * - ROLE_API_USER tokens carry `allowedStoreIds`; the requested store must
+ * - Service-account tokens carry `allowedStoreIds`; the requested store must
  *   be in that list (canAccessStore returns true when allowedStoreIds is null,
  *   so unrestricted keys are unaffected).
  * - Customer tokens with scoped allowedStoreIds may not switch to a store
@@ -46,7 +46,11 @@ class StoreContextAuthorizationListener
         $request = $event->getRequest();
         $resolvedStoreId = $request->attributes->get(StoreContextListener::ATTR_RESOLVED_STORE_ID);
         if ($resolvedStoreId === null) {
-            return;
+            // No explicit store header/param was sent, but the request still
+            // operates against the default store. A store-scoped token must be
+            // checked against that effective store too, otherwise it bypasses
+            // its allowlist by simply omitting the header.
+            $resolvedStoreId = \Maho\ApiPlatform\Service\StoreContext::getStoreId();
         }
 
         $token = $this->tokenStorage->getToken();

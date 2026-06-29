@@ -11,7 +11,6 @@ declare(strict_types=1);
 namespace Mage\SalesRule\Api;
 
 use ApiPlatform\Metadata\ApiProperty;
-use ApiPlatform\Metadata\ApiResource;
 use ApiPlatform\Metadata\Delete;
 use ApiPlatform\Metadata\Get;
 use ApiPlatform\Metadata\GetCollection;
@@ -22,36 +21,38 @@ use ApiPlatform\Metadata\GraphQl\Mutation;
 use ApiPlatform\Metadata\GraphQl\Query;
 use ApiPlatform\Metadata\GraphQl\QueryCollection;
 use Maho\ApiPlatform\CrudResource;
+use Maho\Config\ApiResource;
 
 #[ApiResource(
     shortName: 'Coupon',
+    mahoSection: 'Sales',
     description: 'Coupon / price rule management resource',
     provider: CouponProvider::class,
     processor: CouponProcessor::class,
     operations: [
         new Get(
             uriTemplate: '/coupons/{id}',
-            security: "is_granted('ROLE_ADMIN') or is_granted('ROLE_API_USER')",
+            security: "is_granted('ROLE_ADMIN') or is_granted('coupons/read')",
             description: 'Get a coupon by ID',
         ),
         new GetCollection(
             uriTemplate: '/coupons',
-            security: "is_granted('ROLE_ADMIN') or is_granted('ROLE_API_USER')",
+            security: "is_granted('ROLE_ADMIN') or is_granted('coupons/read')",
             description: 'Get all coupons',
         ),
         new Post(
             uriTemplate: '/coupons',
-            security: "is_granted('ROLE_ADMIN') or is_granted('ROLE_API_USER')",
+            security: "is_granted('ROLE_ADMIN') or is_granted('coupons/create')",
             description: 'Create a new coupon with price rule',
         ),
         new Put(
             uriTemplate: '/coupons/{id}',
-            security: "is_granted('ROLE_ADMIN') or is_granted('ROLE_API_USER')",
+            security: "is_granted('ROLE_ADMIN') or is_granted('coupons/write')",
             description: 'Update a coupon and its price rule',
         ),
         new Delete(
             uriTemplate: '/coupons/{id}',
-            security: "is_granted('ROLE_ADMIN') or is_granted('ROLE_API_USER')",
+            security: "is_granted('ROLE_ADMIN') or is_granted('coupons/delete')",
             description: 'Delete a coupon and its price rule',
         ),
         new Post(
@@ -64,12 +65,12 @@ use Maho\ApiPlatform\CrudResource;
         new Query(
             name: 'item_query',
             description: 'Get a coupon by ID',
-            security: "is_granted('ROLE_ADMIN') or is_granted('ROLE_API_USER')",
+            security: "is_granted('ROLE_ADMIN') or is_granted('coupons/read')",
         ),
         new QueryCollection(
             name: 'collection_query',
             description: 'Get all coupons',
-            security: "is_granted('ROLE_ADMIN') or is_granted('ROLE_API_USER')",
+            security: "is_granted('ROLE_ADMIN') or is_granted('coupons/read')",
         ),
         new Mutation(
             name: 'createCoupon',
@@ -86,7 +87,7 @@ use Maho\ApiPlatform\CrudResource;
                 'toDate' => ['type' => 'String'],
                 'minimumSubtotal' => ['type' => 'Float'],
             ],
-            security: "is_granted('ROLE_ADMIN') or is_granted('ROLE_API_USER')",
+            security: "is_granted('coupons/create')",
         ),
         new Mutation(
             name: 'updateCoupon',
@@ -104,12 +105,12 @@ use Maho\ApiPlatform\CrudResource;
                 'toDate' => ['type' => 'String'],
                 'minimumSubtotal' => ['type' => 'Float'],
             ],
-            security: "is_granted('ROLE_ADMIN') or is_granted('ROLE_API_USER')",
+            security: "is_granted('coupons/write')",
         ),
         new DeleteMutation(
             name: 'deleteCoupon',
             description: 'Delete a coupon and its price rule',
-            security: "is_granted('ROLE_ADMIN') or is_granted('ROLE_API_USER')",
+            security: "is_granted('coupons/delete')",
         ),
         new Mutation(
             name: 'validateCoupon',
@@ -118,7 +119,7 @@ use Maho\ApiPlatform\CrudResource;
                 'code' => ['type' => 'String!'],
                 'cartId' => ['type' => 'Int'],
             ],
-            security: "is_granted('ROLE_ADMIN') or is_granted('ROLE_API_USER') or is_granted('ROLE_CUSTOMER')",
+            security: "is_granted('ROLE_CUSTOMER') or is_granted('coupons/write')",
         ),
     ],
 )]

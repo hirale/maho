@@ -17,7 +17,7 @@ use Symfony\Component\HttpKernel\Exception\BadRequestHttpException;
 use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 
 /**
- * Order State Processor - Handles order mutations for API Platform
+ * Order State Processor - Handles order mutations for API Platform.
  */
 final class OrderProcessor extends \Maho\ApiPlatform\Processor
 {
@@ -41,28 +41,53 @@ final class OrderProcessor extends \Maho\ApiPlatform\Processor
     {
         $operationName = $operation->getName();
 
-        // Bridge raw REST body → context args. API Platform deserialises POST
+        // Bridge raw REST body into context args. API Platform deserialises POST
         // bodies into the resource DTO (Order here), but the place-order
         // endpoint receives a storefront-shaped payload (shippingAddress,
         // billingAddress, paymentData, etc.) that doesn't map onto Order
         // fields. Parse the raw body so the placeOrder handler can read it.
         // GraphQL invocations already populate $context['args']['input'].
-        if (empty($context['args']['input'])) {
-            $context['args']['input'] = [];
-            $request = $context['request'] ?? null;
-            if ($request instanceof \Symfony\Component\HttpFoundation\Request) {
-                $body = json_decode($request->getContent(), true);
-                if (is_array($body)) {
-                    $context['args']['input'] = $body;
-                }
+        $this->normalizeGraphQlInput($context);
+
+        return match ($operationName) {
+            'placeOrder', '_api_/orders_post', 'place_guest_order', 'place_customer_order' => $this->placeOrder($context, $uriVariables),
+            'cancel', 'order_cancel' => $this->cancelOrder($context, $uriVariables),
+            'hold', 'order_hold' => $this->holdOrder($context, $uriVariables),
+            'unhold', 'order_unhold' => $this->unholdOrder($context, $uriVariables),
+            'addComment', 'order_add_comment' => $this->addOrderComment($context, $uriVariables),
+            default => $data instanceof Order ? $data : new Order(),
+        };
+    }
+
+    /**
+     * Resolve the target order from the request: numeric {id} in the REST URI,
+     * or orderId / incrementId in the GraphQL/body args. Enforces that a plain
+     * customer caller owns the order; admin and orders/write service tokens are
+     * trusted (gated upstream by the operation security expression).
+     */
+    private function resolveManagedOrder(array $context, array $uriVariables): \Mage_Sales_Model_Order
+    {
+        $args = $context['args']['input'] ?? [];
+        $orderId = $uriVariables['id'] ?? $args['orderId'] ?? null;
+        $incrementId = $args['incrementId'] ?? null;
+
+        $order = $this->orderService->getOrder(
+            $orderId !== null ? (int) $orderId : null,
+            $incrementId,
+        );
+        if (!$order) {
+            throw new NotFoundHttpException('Order not found');
+        }
+
+        if (!$this->isAdmin() && !$this->isApiUser()) {
+            $customerId = $this->getAuthenticatedCustomerId();
+            if (!$customerId || (int) $order->getCustomerId() !== $customerId) {
+                // Don't disclose existence to a non-owner.
+                throw new NotFoundHttpException('Order not found');
             }
         }
 
-        return match ($operationName) {
-            'placeOrder', '_api_/orders_post', 'place_guest_order' => $this->placeOrder($context, $uriVariables),
-            'cancelOrder' => $this->cancelOrder($context),
-            default => $data instanceof Order ? $data : new Order(),
-        };
+        return $order;
     }
 
     /**
@@ -76,6 +101,16 @@ final class OrderProcessor extends \Maho\ApiPlatform\Processor
     {
         $args = $context['args']['input'] ?? $context['request_data'] ?? [];
         $cartId = $args['cartId'] ?? null;
+        // Recover the numeric cart id from the authenticated /carts/{id}/place-order
+        // path when it wasn't supplied in the body. Ownership is enforced below by
+        // verifyCartOwnership() (accessedByMaskedId=false → customer-ownership check).
+        if (!$cartId) {
+            $request = $context['request'] ?? null;
+            if ($request instanceof \Symfony\Component\HttpFoundation\Request
+                && preg_match('#/carts/(\d+)/place-order#', $request->getPathInfo(), $cm)) {
+                $cartId = $cm[1];
+            }
+        }
         // Accept the masked-id from either the request body or from the URI.
         // We pull from the Request path rather than $uriVariables because API
         // Platform casts URI placeholders to the resource identifier's PHP
@@ -96,7 +131,7 @@ final class OrderProcessor extends \Maho\ApiPlatform\Processor
         $orderNote = $args['orderNote'] ?? null;
         // POS-only fields: only trust them from admin/api callers so a guest
         // cannot stamp an arbitrary employee id or cash amount onto the order.
-        $isPrivileged = $this->isAdmin() || $this->isApiUser();
+        $isPrivileged = $this->isPrivilegedOrderActor();
         $cashTendered = ($isPrivileged && isset($args['cashTendered'])) ? (float) $args['cashTendered'] : null;
         $employeeId = ($isPrivileged && isset($args['employeeId'])) ? (int) $args['employeeId'] : null;
         $paymentMethod = $args['paymentMethod'] ?? null;
@@ -126,7 +161,7 @@ final class OrderProcessor extends \Maho\ApiPlatform\Processor
         }
 
         // Set customer email from the body if provided (guest checkout)
-        if ($guestEmail && filter_var($guestEmail, FILTER_VALIDATE_EMAIL)) {
+        if ($guestEmail && \Mage::helper('core')->isValidEmail($guestEmail)) {
             $quote->setCustomerEmail($guestEmail);
         }
 
@@ -156,14 +191,17 @@ final class OrderProcessor extends \Maho\ApiPlatform\Processor
         }
         $quote->setTotalsCollectedFlag(false);
         $quote->collectTotals();
-        $quote->save();
 
         // Reject a method the client made up: after rates are collected the
         // chosen code must resolve to a real rate, otherwise a caller could
         // claim e.g. free shipping that the store does not actually offer.
+        // Validate before persisting so a bogus method never lands on the saved
+        // quote's shipping address (which would corrupt later loads of the cart).
         if ($validateShippingMethod && !$quote->getShippingAddress()->getShippingRateByCode($shippingMethod)) {
             throw new BadRequestHttpException('Shipping method is not available for this address');
         }
+
+        $quote->save();
 
         // Allow modules to prepare the quote before order placement
         // (e.g. POS module sets default address, shipping, payment for admin orders)
@@ -196,36 +234,58 @@ final class OrderProcessor extends \Maho\ApiPlatform\Processor
     /**
      * Cancel order
      */
-    private function cancelOrder(array $context): Order
+    private function cancelOrder(array $context, array $uriVariables = []): Order
     {
         $args = $context['args']['input'] ?? [];
-        $orderId = $args['orderId'] ?? null;
-        $incrementId = $args['incrementId'] ?? null;
         $reason = $args['reason'] ?? null;
 
-        // Get order
-        $order = $this->orderService->getOrder(
-            $orderId ? (int) $orderId : null,
-            $incrementId,
-        );
-
-        if (!$order) {
-            throw new NotFoundHttpException('Order not found');
-        }
-
-        // Verify access: customers can only cancel their own orders
-        if (!$this->isAdmin() && !$this->isApiUser()) {
-            $customerId = $this->getAuthenticatedCustomerId();
-            if (!$customerId) {
-                throw new BadRequestHttpException('Authentication required to cancel orders');
-            }
-            if ((int) $order->getCustomerId() !== $customerId) {
-                throw new NotFoundHttpException('Order not found');
-            }
-        }
-
-        // Cancel order
+        $order = $this->resolveManagedOrder($context, $uriVariables);
         $order = $this->orderService->cancelOrder($order, $reason);
+
+        return $this->orderProvider->mapToDto($order);
+    }
+
+    /**
+     * Put an order on hold (admin / orders-write only).
+     */
+    private function holdOrder(array $context, array $uriVariables = []): Order
+    {
+        $reason = $context['args']['input']['reason'] ?? null;
+
+        $order = $this->resolveManagedOrder($context, $uriVariables);
+        $order = $this->orderService->holdOrder($order, $reason);
+
+        return $this->orderProvider->mapToDto($order);
+    }
+
+    /**
+     * Release an order from hold (admin / orders-write only).
+     */
+    private function unholdOrder(array $context, array $uriVariables = []): Order
+    {
+        $reason = $context['args']['input']['reason'] ?? null;
+
+        $order = $this->resolveManagedOrder($context, $uriVariables);
+        $order = $this->orderService->unholdOrder($order, $reason);
+
+        return $this->orderProvider->mapToDto($order);
+    }
+
+    /**
+     * Add a status-history comment to an order (admin / orders-write only).
+     */
+    private function addOrderComment(array $context, array $uriVariables = []): Order
+    {
+        $args = $context['args']['input'] ?? [];
+        $comment = trim((string) ($args['comment'] ?? $args['note'] ?? ''));
+        if ($comment === '') {
+            throw new BadRequestHttpException('Comment text is required');
+        }
+        $notifyCustomer = (bool) ($args['notifyCustomer'] ?? false);
+        $visibleOnFront = (bool) ($args['visibleOnFront'] ?? false);
+
+        $order = $this->resolveManagedOrder($context, $uriVariables);
+        $order = $this->orderService->addOrderNote($order, $comment, $notifyCustomer, $visibleOnFront);
 
         return $this->orderProvider->mapToDto($order);
     }
@@ -259,8 +319,25 @@ final class OrderProcessor extends \Maho\ApiPlatform\Processor
             $quote,
             $accessedByMaskedId,
             $this->getAuthenticatedCustomerId(),
-            $this->isAdmin() || $this->isApiUser(),
+            $this->isPrivilegedOrderActor(),
         );
+    }
+
+    /**
+     * Whether the caller may place/manage an order on any cart, bypassing
+     * ownership. Admins are gated upstream by AdminAclListener
+     * (Order::ADMIN_RESOURCE); a service token is trusted only when it holds the
+     * orders/create grant. A bare service-account token without it stays subject
+     * to the guest masked-id / customer-ownership rules, so it can't place an
+     * order from an arbitrary enumerable cart id. Closes the gap left by the
+     * overridden process() bypassing the base Processor's requirePermission().
+     */
+    private function isPrivilegedOrderActor(): bool
+    {
+        if ($this->isAdmin()) {
+            return true;
+        }
+        return $this->isApiUser() && $this->getAuthorizedUser()->hasPermission('orders/create');
     }
 
 }

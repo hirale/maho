@@ -35,6 +35,10 @@ final class ProductTierPriceProcessor extends \Maho\ApiPlatform\Processor
         $user = $this->getAuthorizedUser();
         $productId = (int) ($uriVariables['productId'] ?? 0);
 
+        // Enforce website scope for store-restricted API users on every
+        // sub-resource write/delete (mirrors ProductProcessor's main CRUD check).
+        $this->authorizeProductWebsites($this->loadProduct($productId), $user);
+
         if ($operation instanceof DeleteOperationInterface) {
             $this->requirePermission($user, 'products/delete');
             return $this->handleDeleteAll($productId);
@@ -48,8 +52,15 @@ final class ProductTierPriceProcessor extends \Maho\ApiPlatform\Processor
     {
         $product = $this->loadProduct($productId);
 
+        // This endpoint takes a top-level JSON array of tier prices (not the
+        // object-with-fields shape parseRequestBody() normalises for), and must
+        // reject a non-array body rather than silently treat it as empty.
         $request = $context['request'] ?? null;
-        $body = $request ? json_decode($request->getContent(), true) : [];
+        try {
+            $body = $request ? \Mage::helper('core')->jsonDecode($request->getContent() ?: '[]') : [];
+        } catch (\JsonException) {
+            throw new BadRequestHttpException('Invalid JSON in request body');
+        }
 
         if (!is_array($body)) {
             throw new BadRequestHttpException('Request body must be an array of tier prices');

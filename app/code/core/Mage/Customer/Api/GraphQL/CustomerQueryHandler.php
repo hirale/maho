@@ -19,7 +19,7 @@ use Maho\ApiPlatform\Exception\ValidationException;
 use Maho\ApiPlatform\Security\AdminAcl;
 
 /**
- * Customer Query Handler
+ * Customer Query Handler.
  *
  * Handles all customer-related GraphQL operations for admin API.
  * Uses CustomerProvider::mapToDto() for model-based mapping to ensure
@@ -100,12 +100,6 @@ class CustomerQueryHandler
         $customer->setLastname($lastName);
         $customer->setGroupId($input['groupId'] ?? 1);
 
-        // Set optional telephone
-        if (!empty($input['telephone'])) {
-            // Store phone in billing address
-            $customer->setData('telephone', $input['telephone']);
-        }
-
         // Generate random password (customer can reset via email)
         $password = \Mage::helper('core')->getRandomString(12);
         $customer->setPassword($password);
@@ -134,7 +128,8 @@ class CustomerQueryHandler
                 'success' => true,
             ]];
         } catch (\Exception $e) {
-            throw ValidationException::invalidValue('customer', 'failed to create: ' . $e->getMessage());
+            \Mage::logException($e);
+            throw ValidationException::invalidValue('customer', 'failed to create the customer', $e);
         }
     }
 
@@ -169,10 +164,12 @@ class CustomerQueryHandler
             $address->setIsDefaultShipping(true);
         }
 
-        // Update customer email if provided (email is on customer, not address)
-        if (isset($input['email']) && $input['email'] !== $customer->getEmail()) {
+        // Update customer email if provided (email is on customer, not address).
+        // The actual save is deferred into the try block below so the email and address
+        // writes either both succeed or both surface the error to the caller.
+        $emailChanged = isset($input['email']) && $input['email'] !== $customer->getEmail();
+        if ($emailChanged) {
             $customer->setEmail($input['email']);
-            $customer->save();
         }
 
         // Update address fields
@@ -195,6 +192,9 @@ class CustomerQueryHandler
         }
 
         try {
+            if ($emailChanged) {
+                $customer->save();
+            }
             $address->save();
 
             // Reload customer to get updated address
@@ -205,7 +205,8 @@ class CustomerQueryHandler
                 'customer' => $this->mapCustomer($customer),
             ]];
         } catch (\Exception $e) {
-            throw ValidationException::invalidValue('address', 'failed to update: ' . $e->getMessage());
+            \Mage::logException($e);
+            throw ValidationException::invalidValue('address', 'failed to update the address', $e);
         }
     }
 

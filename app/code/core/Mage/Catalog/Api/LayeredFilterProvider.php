@@ -15,7 +15,7 @@ use ApiPlatform\State\Pagination\TraversablePaginator;
 use Maho\ApiPlatform\Service\StoreContext;
 
 /**
- * Layered Filter Provider, uses Maho's built-in catalog layer to build facets
+ * Layered Filter Provider, uses Maho's built-in catalog layer to build facets.
  */
 final class LayeredFilterProvider extends \Maho\ApiPlatform\Provider
 {
@@ -43,7 +43,7 @@ final class LayeredFilterProvider extends \Maho\ApiPlatform\Provider
 
         $cached = \Mage::app()->getCache()->load($cacheKey);
         if ($cached !== false) {
-            $data = json_decode($cached, true);
+            $data = \Mage::helper('core')->jsonDecode($cached, true);
             if (is_array($data)) {
                 $filters = array_map(fn(array $f) => $this->arrayToDto($f), $data);
                 return new TraversablePaginator(new \ArrayIterator($filters), 1, 100, count($filters));
@@ -55,7 +55,7 @@ final class LayeredFilterProvider extends \Maho\ApiPlatform\Provider
         if (!empty($filters)) {
             $cacheData = array_map(fn(LayeredFilter $f) => $this->dtoToArray($f), $filters);
             \Mage::app()->getCache()->save(
-                json_encode($cacheData),
+                \Mage::helper('core')->jsonEncode($cacheData),
                 $cacheKey,
                 ['API_LAYERED_FILTERS', 'API_PRODUCTS'],
                 \Maho_ApiPlatform_Model_Observer::getCacheTtl(),
@@ -77,8 +77,12 @@ final class LayeredFilterProvider extends \Maho\ApiPlatform\Provider
             return [];
         }
 
+        // Fresh instance, not the singleton: under FPM workers and the test
+        // runner the singleton retains setCurrentCategory() state across
+        // requests, which would leak the wrong category into facet counts
+        // (mirrors ProductProvider).
         /** @var \Mage_Catalog_Model_Layer $layer */
-        $layer = \Mage::getSingleton('catalog/layer');
+        $layer = \Mage::getModel('catalog/layer');
         $layer->setCurrentCategory($category);
 
         $filterableAttributes = $layer->getFilterableAttributes();

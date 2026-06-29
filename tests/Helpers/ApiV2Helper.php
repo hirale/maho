@@ -16,7 +16,7 @@ use Lcobucci\JWT\Signer\Key\InMemory;
 use Maho\ApiPlatform\Service\JwtService;
 
 /**
- * API v2 Test Helper
+ * API v2 Test Helper.
  *
  * Provides HTTP client methods, JWT token generation, and test fixtures
  * for integration testing the API Platform REST and GraphQL endpoints.
@@ -185,6 +185,26 @@ class ApiV2Helper
                 // Ignore cleanup errors
             }
         }
+
+        // Delete simple config-table rows created by CRUD tests (safety net for
+        // a test that fails before its own DELETE call). Each maps a tracked
+        // type to its table + primary key.
+        $simpleTables = [
+            'customer_group' => ['customer_group', 'customer_group_id'],
+            'tax_class' => ['tax_class', 'class_id'],
+            'tax_rate' => ['tax_calculation_rate', 'tax_calculation_rate_id'],
+            'tax_rule' => ['tax_calculation_rule', 'tax_calculation_rule_id'],
+        ];
+        foreach ($simpleTables as $type => [$table, $pk]) {
+            if (!empty(self::$createdEntities[$type])) {
+                $idList = implode(',', array_map('intval', self::$createdEntities[$type]));
+                try {
+                    $write->query("DELETE FROM {$table} WHERE {$pk} IN ({$idList})");
+                } catch (\Exception $e) {
+                    // Ignore cleanup errors
+                }
+            }
+        }
         self::$createdEntities = [];
     }
 
@@ -346,7 +366,7 @@ class ApiV2Helper
             'customer_id' => $customerId,
             'email' => self::fixtures('customer_email'),
             'type' => 'customer',
-            'roles' => ['ROLE_USER'],
+            'roles' => ['ROLE_CUSTOMER'],
         ]);
     }
 
@@ -381,7 +401,7 @@ class ApiV2Helper
             ->expiresAt($past->modify('+1 day')) // expired 1 day ago
             ->withClaim('customer_id', 1)
             ->withClaim('type', 'customer')
-            ->withClaim('roles', ['ROLE_USER'])
+            ->withClaim('roles', ['ROLE_CUSTOMER'])
             ->getToken($config->signer(), $config->signingKey());
 
         return $token->toString();
@@ -396,7 +416,7 @@ class ApiV2Helper
             'sub' => 'customer_1',
             'customer_id' => 1,
             'type' => 'customer',
-            'roles' => ['ROLE_USER'],
+            'roles' => ['ROLE_CUSTOMER'],
         ], 'wrong-secret-key-that-does-not-match');
     }
 

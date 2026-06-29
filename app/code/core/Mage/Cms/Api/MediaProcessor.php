@@ -25,7 +25,7 @@ use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 use Symfony\Component\HttpKernel\Exception\UnprocessableEntityHttpException;
 
 /**
- * Media State Processor
+ * Media State Processor.
  *
  * Handles file uploads (POST) and deletions (DELETE) for the media gallery.
  * Requires JWT authentication with media/write permission.
@@ -73,6 +73,12 @@ final class MediaProcessor implements ProcessorInterface
         // Resolve target directory within wysiwyg storage root
         $folder = $request->request->get('folder', 'wysiwyg');
         $folder = $helper->correctPath($folder);
+        // correctPath() does not strip "..", so remove any traversal segments up
+        // front as defense-in-depth before the realpath boundary checks below.
+        $folder = implode('/', array_filter(
+            explode('/', str_replace('\\', '/', $folder)),
+            static fn(string $segment): bool => $segment !== '..',
+        ));
         $targetDir = $helper->getStorageRoot();
 
         if ($folder !== 'wysiwyg' && $folder !== '') {
@@ -82,12 +88,35 @@ final class MediaProcessor implements ProcessorInterface
             }
         }
 
+        // Validate the target path BEFORE creating any directory, so a traversal payload
+        // (correctPath() does not strip "..") cannot create directories outside the storage
+        // root as a side effect of checkAndCreateFolder().
+        $realStorageRoot = realpath($helper->getStorageRoot());
+        $rootBoundary = rtrim($realStorageRoot, DS) . DS;
+
+        // Resolve the deepest existing ancestor of the requested target to validate it,
+        // since realpath() returns false for not-yet-created leaf directories.
+        $probe = rtrim($targetDir, DS);
+        $resolved = false;
+        while ($probe !== '' && $probe !== DS) {
+            $candidate = realpath($probe);
+            if ($candidate !== false) {
+                $resolved = $candidate;
+                break;
+            }
+            $probe = dirname($probe);
+        }
+        if ($resolved === false
+            || ($resolved !== rtrim($realStorageRoot, DS) && !str_starts_with($resolved . DS, $rootBoundary))
+        ) {
+            throw new BadRequestHttpException('Invalid folder path');
+        }
+
         $io = new \Maho\Io\File();
         $io->checkAndCreateFolder($targetDir);
 
-        $realStorageRoot = realpath($helper->getStorageRoot());
         $realTargetDir = realpath($targetDir);
-        if (!$realTargetDir || !str_starts_with($realTargetDir, $realStorageRoot)) {
+        if (!$realTargetDir || !str_starts_with(rtrim($realTargetDir, DS) . DS, $rootBoundary)) {
             throw new BadRequestHttpException('Invalid folder path');
         }
 
@@ -147,7 +176,10 @@ final class MediaProcessor implements ProcessorInterface
         $storageRoot = realpath($helper->getStorageRoot());
         $fullPath = realpath($storageRoot . DS . $helper->correctPath($path));
 
-        if (!$fullPath || !is_file($fullPath) || !str_starts_with($fullPath, $storageRoot)) {
+        // Use a trailing-separator boundary so a sibling directory (e.g.
+        // "<root>_other") can't satisfy the prefix check and escape the root.
+        $rootBoundary = rtrim($storageRoot, DS) . DS;
+        if (!$fullPath || !is_file($fullPath) || !str_starts_with($fullPath, $rootBoundary)) {
             throw new NotFoundHttpException('File not found');
         }
 

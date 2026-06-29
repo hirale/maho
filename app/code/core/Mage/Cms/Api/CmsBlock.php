@@ -36,28 +36,35 @@ use Maho\ApiPlatform\GraphQl\CustomQueryResolver;
         new Post(
             uriTemplate: '/cms-blocks',
             processor: CmsBlockProcessor::class,
-            security: "is_granted('ROLE_API_USER')",
+            security: "is_granted('ROLE_ADMIN') or is_granted('cms-blocks/write')",
             description: 'Creates a new CMS block',
         ),
         new Put(
             uriTemplate: '/cms-blocks/{id}',
             processor: CmsBlockProcessor::class,
-            security: "is_granted('ROLE_API_USER')",
+            security: "is_granted('ROLE_ADMIN') or is_granted('cms-blocks/write')",
             description: 'Updates a CMS block',
         ),
         new Delete(
             uriTemplate: '/cms-blocks/{id}',
             processor: CmsBlockProcessor::class,
-            security: "is_granted('ROLE_API_USER')",
+            security: "is_granted('ROLE_ADMIN') or is_granted('cms-blocks/delete')",
             description: 'Deletes a CMS block',
         ),
     ],
     graphQlOperations: [
         new Query(name: 'item_query', description: 'Get a CMS block by ID', security: 'true'),
         new QueryCollection(name: 'collection_query', description: 'Get CMS blocks', security: 'true'),
-        new Query(name: 'cmsBlock'),
-        new QueryCollection(name: 'cmsBlocks'),
         new Query(
+            security: 'true',
+            name: 'cmsBlock',
+        ),
+        new QueryCollection(
+            security: 'true',
+            name: 'cmsBlocks',
+        ),
+        new Query(
+            security: 'true',
             name: 'cmsBlockByIdentifier',
             args: ['identifier' => ['type' => 'String!']],
             resolver: CustomQueryResolver::class,
@@ -81,10 +88,10 @@ class CmsBlock extends CrudResource
     #[ApiProperty(writable: false, extraProperties: ['computed' => true])]
     public string $status = 'enabled';
 
-    public bool $isActive = true;
+    public ?bool $isActive = null;
 
-    /** @var int[] */
-    public array $stores = [0];
+    /** @var int[]|null */
+    public ?array $stores = null;
 
     #[ApiProperty(writable: false, extraProperties: ['modelField' => 'creation_time'])]
     public ?string $createdAt = null;
@@ -98,7 +105,7 @@ class CmsBlock extends CrudResource
     public static function afterLoad(self $dto, object $model): void
     {
         $dto->content = self::filterContent($dto->content ?? '');
-        $dto->status = $dto->isActive ? 'enabled' : 'disabled';
+        $dto->status = ($dto->isActive ?? false) ? 'enabled' : 'disabled';
 
         if (method_exists($model->getResource(), 'lookupStoreIds')) {
             $dto->stores = array_map('intval', $model->getResource()->lookupStoreIds($model->getId()));

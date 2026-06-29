@@ -14,7 +14,7 @@ use Maho\ApiPlatform\Service\StoreDefaults;
 use Symfony\Component\HttpKernel\Exception\AccessDeniedHttpException;
 
 /**
- * Cart Service - Business logic for cart operations
+ * Cart Service - Business logic for cart operations.
  */
 class CartService
 {
@@ -32,7 +32,18 @@ class CartService
         $quote = \Mage::getModel('sales/quote');
 
         if ($storeId) {
-            $quote->setStoreId($storeId);
+            // A client must not bind a cart to an arbitrary, disabled, or
+            // non-existent store: the store drives pricing and gift-card/coupon
+            // website scoping for the whole cart lifecycle.
+            try {
+                $store = \Mage::app()->getStore($storeId);
+            } catch (\Throwable) {
+                $store = null;
+            }
+            if (!$store || !$store->getId() || !$store->getIsActive()) {
+                throw new \Symfony\Component\HttpKernel\Exception\BadRequestHttpException("Invalid store: {$storeId}");
+            }
+            $quote->setStoreId((int) $store->getId());
         } else {
             // Use the default store, Mage::app()->getStore() returns admin (0) under Symfony
             $defaultStore = \Mage::app()->getDefaultStoreView();
@@ -102,13 +113,22 @@ class CartService
      */
     public function getCustomerCart(int $customerId): \Mage_Sales_Model_Quote
     {
-        $quote = \Mage::getModel('sales/quote')
+        // Scope the lookup to the current API store. loadByCustomer() otherwise
+        // returns the most-recently-updated active quote across all stores, which
+        // in a multi-store setup surfaces another store's cart (wrong prices,
+        // currency and availability). Mirrors AuthTokenProcessor's grant path.
+        $loadQuote = fn(): \Mage_Sales_Model_Quote => \Mage::getModel('sales/quote')
+            ->setSharedStoreIds([\Mage::app()->getStore()->getId()])
             ->loadByCustomer($customerId);
 
+        $quote = $loadQuote();
         if (!$quote->getId()) {
-            // Create new cart for customer
-            $result = $this->createEmptyCart($customerId);
-            $quote = $result['quote'];
+            // No active cart: create one. Two concurrent first-time requests can
+            // race here and each create an active cart; the loser's cart is then
+            // dropped on the next load. That's a rare, low-impact outcome (an
+            // empty cart), so we don't serialize creation: the cost of a lock on
+            // every cart bootstrap isn't worth guarding against it.
+            $quote = $this->createEmptyCart($customerId)['quote'];
         }
 
         return $quote;
@@ -129,7 +149,11 @@ class CartService
 
         // Bridge REST request body for Provider context (Processor does this later, but Provider runs first)
         if (empty($args) && $request instanceof \Symfony\Component\HttpFoundation\Request) {
-            $body = json_decode((string) $request->getContent(), true);
+            try {
+                $body = \Mage::helper('core')->jsonDecode($request->getContent() ?: '[]');
+            } catch (\JsonException) {
+                throw new \Symfony\Component\HttpKernel\Exception\BadRequestHttpException('Invalid JSON in request body');
+            }
             if (is_array($body)) {
                 $args = $body;
             }
@@ -299,6 +323,13 @@ class CartService
                     ->load($parentId);
 
                 if ($configurableProduct->getId()) {
+                    // The originally-loaded simple passed the status gate, but the
+                    // product actually added to the cart is the configurable parent.
+                    // A disabled parent with an enabled child must not be addable.
+                    if ((int) $configurableProduct->getStatus() !== \Mage_Catalog_Model_Product_Status::STATUS_ENABLED) {
+                        throw new \RuntimeException("Product '{$sku}' is not available");
+                    }
+
                     // Get the super_attribute values for this simple product
                     $superAttributes = $this->getSuperAttributesForSimple($configurableProduct, $product);
 
@@ -309,10 +340,21 @@ class CartService
 
                         // Use the configurable product instead
                         $product = $configurableProduct;
-                        $this->logDebug("Using configurable product {$parentId} with super_attributes: " . json_encode($superAttributes));
+                        $this->logDebug("Using configurable product {$parentId} with super_attributes: " . \Mage::helper('core')->jsonEncode($superAttributes));
                     }
                 }
             }
+        }
+
+        // If the product is still a not-visible simple at this point, it was not
+        // promoted to a configurable parent (no parent, or super-attributes could
+        // not be resolved). Such a SKU must not be added directly, as that would
+        // bypass the visibility gate. Only genuine configurable variants reach the
+        // cart, and always as their configurable parent.
+        if ($product->getTypeId() === \Mage_Catalog_Model_Product_Type::TYPE_SIMPLE
+            && (int) $product->getVisibility() === \Mage_Catalog_Model_Product_Visibility::VISIBILITY_NOT_VISIBLE
+        ) {
+            throw new \RuntimeException("Product '{$sku}' is not available");
         }
 
         $this->logDebug("Product loaded: ID={$product->getId()}, StoreId={$product->getStoreId()}, Price={$product->getPrice()}, FinalPrice={$product->getFinalPrice()}");
@@ -401,7 +443,7 @@ class CartService
         $item = $quote->getItemById($itemId);
 
         if (!$item) {
-            throw new \RuntimeException("Cart item with ID '{$itemId}' not found");
+            throw new \Symfony\Component\HttpKernel\Exception\NotFoundHttpException("Cart item with ID '{$itemId}' not found");
         }
 
         $item->setQty($qty);
@@ -421,6 +463,12 @@ class CartService
      */
     public function removeItem(\Mage_Sales_Model_Quote $quote, int $itemId): \Mage_Sales_Model_Quote
     {
+        // removeItem() is a silent no-op for an unknown ID, so guard explicitly
+        // to return a 404 instead of a false-positive 200 (mirrors updateItem()).
+        if (!$quote->getItemById($itemId)) {
+            throw new \Symfony\Component\HttpKernel\Exception\NotFoundHttpException("Cart item with ID '{$itemId}' not found");
+        }
+
         $quote->removeItem($itemId);
         $this->collectAndVerifyTotals($quote);
 
@@ -502,7 +550,7 @@ class CartService
      *
      * @throws \RuntimeException
      */
-    public function applyGiftcard(\Mage_Sales_Model_Quote $quote, string $giftcardCode): \Mage_Sales_Model_Quote
+    public function applyGiftcard(\Mage_Sales_Model_Quote $quote, string $giftcardCode, ?float $amount = null): \Mage_Sales_Model_Quote
     {
         if (!$giftcardCode) {
             throw new \RuntimeException('Gift card code is required');
@@ -543,18 +591,23 @@ class CartService
 
         // Get currently applied codes
         $appliedCodes = $quote->getGiftcardCodes();
-        $appliedCodes = $appliedCodes ? json_decode($appliedCodes, true) : [];
+        $appliedCodes = $appliedCodes ? \Mage::helper('core')->jsonDecode($appliedCodes, true) : [];
 
         // Check if already applied
         if (isset($appliedCodes[$giftcardCode])) {
             throw new \RuntimeException('Gift card "' . $giftcardCode . '" is already applied');
         }
 
-        // Apply gift card - store max amount available (in quote currency)
+        // Apply gift card - store the requested amount capped at the live
+        // balance (in quote currency), or the full balance when no amount is
+        // given. revalidateGiftcards() re-checks at placement, but the capped
+        // value here keeps quote totals and pre-auth correct in the meantime.
         $quoteCurrency = $quote->getQuoteCurrencyCode();
-        $appliedCodes[$giftcardCode] = $giftcard->getBalance($quoteCurrency);
+        $balance = (float) $giftcard->getBalance($quoteCurrency);
+        $appliedCodes[$giftcardCode] = $amount === null ? $balance : min($amount, $balance);
 
-        $quote->setGiftcardCodes(json_encode($appliedCodes));
+        $quote->setGiftcardCodes(\Mage::helper('core')->jsonEncode($appliedCodes));
+        $quote->setTotalsCollectedFlag(false);
         $quote->collectTotals()->save();
 
         return $quote;
@@ -573,7 +626,7 @@ class CartService
     public function revalidateGiftcards(\Mage_Sales_Model_Quote $quote): \Mage_Sales_Model_Quote
     {
         $applied = $quote->getGiftcardCodes();
-        $applied = $applied ? json_decode($applied, true) : [];
+        $applied = $applied ? \Mage::helper('core')->jsonDecode($applied, true) : [];
         if (!$applied) {
             return $quote;
         }
@@ -601,7 +654,7 @@ class CartService
         }
 
         if ($changed) {
-            $quote->setGiftcardCodes(json_encode($applied));
+            $quote->setGiftcardCodes(\Mage::helper('core')->jsonEncode($applied));
             $quote->setTotalsCollectedFlag(false);
             $quote->collectTotals()->save();
         }
@@ -622,7 +675,7 @@ class CartService
 
         // Get currently applied codes
         $appliedCodes = $quote->getGiftcardCodes();
-        $appliedCodes = $appliedCodes ? json_decode($appliedCodes, true) : [];
+        $appliedCodes = $appliedCodes ? \Mage::helper('core')->jsonDecode($appliedCodes, true) : [];
 
         // Check if gift card is applied
         if (!isset($appliedCodes[$giftcardCode])) {
@@ -637,49 +690,96 @@ class CartService
             $quote->setGiftcardAmount(0);
             $quote->setBaseGiftcardAmount(0);
         } else {
-            $quote->setGiftcardCodes(json_encode($appliedCodes));
+            $quote->setGiftcardCodes(\Mage::helper('core')->jsonEncode($appliedCodes));
         }
 
+        // Force a fresh totals pass, otherwise an already-collected quote in the
+        // same request leaves a stale giftcard_amount on the saved quote.
+        $quote->setTotalsCollectedFlag(false);
         $quote->collectTotals()->save();
 
         return $quote;
     }
 
     /**
-     * Set fulfillment type on a cart item (SHIP or PICKUP for BOPIS)
+     * Set (or update) the gift message on the whole cart, or on a single cart
+     * item when $itemId is given. Mirrors the storefront
+     * Mage_GiftMessage_Model_Observer::checkoutEventCreateGiftMessage flow:
+     * a giftmessage/message row is created/loaded and the entity's
+     * gift_message_id is pointed at it. Requires the GiftMessage module and the
+     * relevant store-config toggle to be enabled.
      *
-     * @throws \RuntimeException
+     * @throws \RuntimeException when gift messages are disabled for the target
      */
-    public function setItemFulfillmentType(\Mage_Sales_Model_Quote $quote, int $itemId, string $fulfillmentType): \Mage_Sales_Model_Quote
-    {
-        $fulfillmentType = strtoupper($fulfillmentType);
-        if (!in_array($fulfillmentType, ['SHIP', 'PICKUP'], true)) {
-            throw new \RuntimeException('Invalid fulfillment type. Must be SHIP or PICKUP');
+    public function setGiftMessage(
+        \Mage_Sales_Model_Quote $quote,
+        ?int $itemId,
+        string $sender,
+        string $recipient,
+        string $message,
+    ): \Mage_Sales_Model_Quote {
+        if (!\Mage::helper('core')->isModuleEnabled('Mage_GiftMessage')) {
+            throw new \RuntimeException('Gift messages are not available');
         }
 
-        $targetItem = null;
-        foreach ($quote->getAllVisibleItems() as $item) {
-            if ((int) $item->getId() === $itemId) {
-                $targetItem = $item;
-                break;
-            }
+        $entity = $this->resolveGiftMessageEntity($quote, $itemId);
+        $helper = \Mage::helper('giftmessage/message');
+        $type = $itemId === null ? 'quote' : 'item';
+        if (!$helper->isMessagesAvailable($type, $entity, $quote->getStoreId())) {
+            throw new \RuntimeException('Gift messages are not available for this ' . ($itemId === null ? 'cart' : 'item'));
         }
 
-        if (!$targetItem) {
-            throw new \RuntimeException('Cart item not found');
+        if (trim($message) === '') {
+            return $this->removeGiftMessage($quote, $itemId);
         }
 
-        $additionalData = $targetItem->getAdditionalData();
-        $data = $additionalData ? json_decode($additionalData, true) : [];
-        if (!is_array($data)) {
-            $data = [];
+        $giftMessage = \Mage::getModel('giftmessage/message');
+        if ($entity->getGiftMessageId()) {
+            $giftMessage->load($entity->getGiftMessageId());
         }
-        $data['fulfillment_type'] = $fulfillmentType;
+        $giftMessage->setSender($sender)
+            ->setRecipient($recipient)
+            ->setMessage($message)
+            ->save();
 
-        $targetItem->setAdditionalData(json_encode($data));
-        $targetItem->save();
+        $entity->setGiftMessageId($giftMessage->getId())->save();
 
         return $quote;
+    }
+
+    /**
+     * Remove the gift message from the cart or a single cart item.
+     */
+    public function removeGiftMessage(\Mage_Sales_Model_Quote $quote, ?int $itemId): \Mage_Sales_Model_Quote
+    {
+        $entity = $this->resolveGiftMessageEntity($quote, $itemId);
+
+        $messageId = (int) $entity->getGiftMessageId();
+        if ($messageId) {
+            $giftMessage = \Mage::getModel('giftmessage/message')->load($messageId);
+            if ($giftMessage->getId()) {
+                $giftMessage->delete();
+            }
+            $entity->setGiftMessageId(0)->save();
+        }
+
+        return $quote;
+    }
+
+    /**
+     * Resolve the entity a gift message attaches to: the quote itself, or one of
+     * its items. Throws when the item id doesn't belong to the quote.
+     */
+    private function resolveGiftMessageEntity(\Mage_Sales_Model_Quote $quote, ?int $itemId): \Mage_Core_Model_Abstract
+    {
+        if ($itemId === null) {
+            return $quote;
+        }
+        $item = $quote->getItemById($itemId);
+        if (!$item || !$item->getId()) {
+            throw new \RuntimeException('Cart item not found');
+        }
+        return $item;
     }
 
     /**
@@ -847,6 +947,9 @@ class CartService
     public function mergeCarts(string $guestMaskedId, int $customerId): \Mage_Sales_Model_Quote
     {
         $guestCartId = $this->getCartIdFromMaskedId($guestMaskedId);
+        if (!$guestCartId) {
+            throw new \RuntimeException('Guest cart not found');
+        }
         // Use loadByIdWithoutStore, admin context may sit on a different store
         // than the guest cart, and store-scoped load() would return an empty
         // quote even though the masked-ID lookup just resolved successfully.
@@ -856,10 +959,12 @@ class CartService
             throw new \RuntimeException('Guest cart not found');
         }
 
-        // Only genuine guest carts may be merged. Reject a masked ID that
-        // resolves to another customer's cart so it cannot be absorbed.
+        // Reject any masked ID that resolves to a cart owned by a different
+        // customer, regardless of the customer_is_guest flag. A cart can carry
+        // customer_is_guest=1 together with a foreign customer_id, which the
+        // previous guard let slip through and allowed to be absorbed.
         $sourceCustomerId = $guestCart->getCustomerId();
-        if (!$guestCart->getCustomerIsGuest() && $sourceCustomerId && (int) $sourceCustomerId !== $customerId) {
+        if ($sourceCustomerId && (int) $sourceCustomerId !== $customerId) {
             throw new \RuntimeException('Guest cart not found');
         }
 
@@ -888,6 +993,7 @@ class CartService
                 }
             }
         }
+        $customerCart->setTotalsCollectedFlag(false);
         $customerCart->collectTotals();
         $customerCart->save();
 
@@ -923,6 +1029,11 @@ class CartService
         if (!preg_match('/^[a-f0-9]{32}$/i', $maskedId)) {
             return null;
         }
+
+        // Masked IDs are always generated lowercase (bin2hex); normalize so the
+        // lookup is deterministic regardless of the column collation and matches
+        // the stored value no matter how the caller cased the input.
+        $maskedId = strtolower($maskedId);
 
         // Database lookup
         $resource = \Mage::getSingleton('core/resource');

@@ -22,7 +22,7 @@ use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 use Symfony\Component\HttpKernel\Exception\UnprocessableEntityHttpException;
 
 /**
- * Category State Processor
+ * Category State Processor.
  *
  * Handles create, update, and delete operations for categories.
  * Requires JWT authentication with categories/write or categories/delete permission.
@@ -76,8 +76,8 @@ final class CategoryProcessor extends \Maho\ApiPlatform\Processor
 
         $category->setData([
             'name' => $data->name,
-            'is_active' => $data->isActive ? 1 : 0,
-            'include_in_menu' => $data->includeInMenu ? 1 : 0,
+            'is_active' => ($data->isActive ?? true) ? 1 : 0,
+            'include_in_menu' => ($data->includeInMenu ?? true) ? 1 : 0,
             'parent_id' => $parentId,
             'path' => $parentCategory->getPath(),
         ]);
@@ -121,8 +121,12 @@ final class CategoryProcessor extends \Maho\ApiPlatform\Processor
             $category->setName($data->name);
         }
 
-        $category->setIsActive($data->isActive ? 1 : 0);
-        $category->setData('include_in_menu', $data->includeInMenu ? 1 : 0);
+        if ($data->isActive !== null) {
+            $category->setIsActive($data->isActive ? 1 : 0);
+        }
+        if ($data->includeInMenu !== null) {
+            $category->setData('include_in_menu', $data->includeInMenu ? 1 : 0);
+        }
 
         if ($data->urlKey !== null) {
             $category->setUrlKey($data->urlKey);
@@ -169,7 +173,7 @@ final class CategoryProcessor extends \Maho\ApiPlatform\Processor
         if ($data->description !== null) {
             $category->setDescription($data->description);
         }
-        if ($data->position !== 0) {
+        if ($data->position !== null) {
             $category->setPosition($data->position);
         }
         if ($data->metaTitle !== null) {

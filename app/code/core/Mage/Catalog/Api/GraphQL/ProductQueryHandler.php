@@ -17,7 +17,7 @@ use Maho\ApiPlatform\Exception\ValidationException;
 use Maho\ApiPlatform\Security\AdminAcl;
 
 /**
- * Product Query Handler
+ * Product Query Handler.
  *
  * Handles all product-related GraphQL operations for admin API.
  * Uses ProductProvider::toDto() for model-based mapping to ensure
@@ -42,8 +42,8 @@ class ProductQueryHandler
         if (!$id) {
             throw ValidationException::requiredField('id');
         }
-        $product = \Mage::getModel('catalog/product')->load((int) $id);
-        return ['product' => $product->getId() ? $this->productProvider->toDto($product)->toArray() : null];
+        $dto = $this->productProvider->loadProductDto((int) $id, false);
+        return ['product' => $dto ? $dto->toArray() : null];
     }
 
     /**
@@ -56,9 +56,8 @@ class ProductQueryHandler
         if (!$sku) {
             throw ValidationException::requiredField('sku');
         }
-        $product = \Mage::getModel('catalog/product')->loadByAttribute('sku', $sku);
-        $dto = $product instanceof \Mage_Catalog_Model_Product ? $this->productProvider->toDto($product)->toArray() : null;
-        return ['productBySku' => $dto];
+        $dto = $this->productProvider->getProductBySku($sku, false);
+        return ['productBySku' => $dto ? $dto->toArray() : null];
     }
 
     /**
@@ -71,12 +70,8 @@ class ProductQueryHandler
         if (!$barcode) {
             throw ValidationException::requiredField('barcode');
         }
-        $product = \Mage::getModel('catalog/product')
-            ->getCollection()
-            ->addAttributeToFilter('barcode', $barcode)
-            ->getFirstItem();
-        /** @var \Mage_Catalog_Model_Product $product */
-        return ['productByBarcode' => $product->getId() ? $this->productProvider->toDto($product)->toArray() : null];
+        $dto = $this->productProvider->getProductByBarcode($barcode, false);
+        return ['productByBarcode' => $dto ? $dto->toArray() : null];
     }
 
     /**
@@ -90,12 +85,19 @@ class ProductQueryHandler
         $pageSize = $variables['pageSize'] ?? $variables['limit'] ?? 20;
         $categoryId = $variables['categoryId'] ?? null;
 
-        // Use search layer for text queries, catalog layer for browsing
+        // Use search layer for text queries, catalog layer for browsing.
+        // Use fresh instances instead of singletons: under FPM workers (and the
+        // test runner) the layer/helper singletons retain state across requests,
+        // so a previous request's query text or current category would leak in.
         if (!empty($search)) {
-            \Mage::helper('catalogsearch')->getQuery()->setQueryText($search);
-            $layer = \Mage::getSingleton('catalogsearch/layer');
+            \Mage::unregister('_helper/catalogsearch');
+            $searchHelper = \Mage::helper('catalogsearch');
+            \Mage::app()->getRequest()->setParam($searchHelper->getQueryParamName(), $search);
+            $searchHelper->getQuery()->setStoreId((int) \Mage::app()->getStore()->getId());
+            $searchHelper->getQuery()->setQueryText($search);
+            $layer = \Mage::getModel('catalogsearch/layer');
         } else {
-            $layer = \Mage::getSingleton('catalog/layer');
+            $layer = \Mage::getModel('catalog/layer');
         }
 
         if ($categoryId) {
@@ -138,12 +140,8 @@ class ProductQueryHandler
         if (!$sku) {
             throw ValidationException::requiredField('sku');
         }
-        $product = \Mage::getModel('catalog/product')->loadByAttribute('sku', $sku);
-        if (!$product instanceof \Mage_Catalog_Model_Product) {
-            return ['getConfigurableProduct' => null];
-        }
-
-        return ['getConfigurableProduct' => $this->productProvider->toDto($product)->toArray()];
+        $dto = $this->productProvider->getProductBySku($sku, false);
+        return ['getConfigurableProduct' => $dto ? $dto->toArray() : null];
     }
 
     /**
@@ -160,7 +158,8 @@ class ProductQueryHandler
             'sku' => $dto->sku,
             'name' => $dto->name,
             'type' => strtoupper($dto->type),
-            'finalPrice' => ['value' => $dto->finalPrice ?? $dto->price ?? 0.0],
+            'currency' => $dto->currency,
+            'finalPrice' => (float) ($dto->finalPrice ?? $dto->price ?? 0.0),
             'stockStatus' => strtoupper(str_replace('-', '_', $dto->stockStatus)),
             'stockQty' => (int) ($dto->stockQty ?? 0),
             'images' => $dto->imageUrl ? [['url' => $dto->imageUrl, 'label' => $dto->name]] : [],
@@ -193,11 +192,20 @@ class ProductQueryHandler
             $parentId = $rootCategoryId;
         }
 
+        // maxDepth is relative to the requested parent, so cap on the parent's
+        // absolute tree level rather than assuming the parent is the store root.
+        // Using $maxDepth + 1 against the global level only works when the parent
+        // sits at level 1; deeper parents would otherwise truncate or return
+        // nothing.
+        $parentCategory = \Mage::getModel('catalog/category')->load((int) $parentId);
+        $parentLevel = $parentCategory->getId() ? (int) $parentCategory->getLevel() : 1;
+        $absoluteMaxLevel = $parentLevel + $maxDepth;
+
         $escapedParentId = addcslashes((string) $parentId, '%_');
         $collection = \Mage::getModel('catalog/category')->getCollection()
             ->addAttributeToSelect(['name', 'is_active', 'position', 'level', 'children_count', 'image'])
             ->addFieldToFilter('path', ['like' => "%/{$escapedParentId}/%"])
-            ->addFieldToFilter('level', ['lteq' => $maxDepth + 1])
+            ->addFieldToFilter('level', ['lteq' => $absoluteMaxLevel])
             ->setOrder('position', 'ASC');
 
         if (!$includeInactive) {

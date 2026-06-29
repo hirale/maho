@@ -12,6 +12,7 @@ namespace Mage\Contacts\Api;
 
 use ApiPlatform\Metadata\Operation;
 use Maho\ApiPlatform\Service\StoreContext;
+use Symfony\Component\HttpKernel\Exception\BadRequestHttpException;
 use Symfony\Component\HttpKernel\Exception\HttpException;
 use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 use Symfony\Component\HttpKernel\Exception\UnprocessableEntityHttpException;
@@ -39,14 +40,25 @@ class ContactFormProcessor extends \Maho\ApiPlatform\Processor
         $storeId = StoreContext::getStoreId();
 
         $request = $context['request'] ?? null;
-        $body = $request ? (json_decode($request->getContent(), true) ?? []) : [];
+        $body = [];
+        if ($request) {
+            $content = $request->getContent();
+            if ($content !== '') {
+                try {
+                    $body = (array) \Mage::helper('core')->jsonDecode($content);
+                } catch (\JsonException) {
+                    throw new BadRequestHttpException('Invalid JSON body');
+                }
+            }
+        }
 
         if (!\Mage::getStoreConfigFlag(self::CONFIG_ENABLED, $storeId)) {
             throw new NotFoundHttpException('Contact form is not available');
         }
 
         // Silently accept honeypot submissions to not reveal the trap
-        if (\Mage::helper('core')->isHoneypotTriggered($body, self::CONFIG_HONEYPOT)) {
+        if (\Mage::getStoreConfigFlag(self::CONFIG_HONEYPOT, $storeId)
+            && \Mage::helper('core')->isHoneypotTriggered($body)) {
             return $this->successResponse();
         }
 
@@ -66,6 +78,11 @@ class ContactFormProcessor extends \Maho\ApiPlatform\Processor
         }
 
         $this->verifyCaptcha($body, $storeId, $request);
+        // Cap by client IP as well as by email: the email-keyed limit alone lets
+        // a single client rotate through unlimited addresses to spam the store
+        // owner (and email-bomb third parties via auto-reply) when CAPTCHA and
+        // honeypot are disabled. Both share the system/rate_limit/contact limit.
+        $this->checkRateLimitByIp("contact:{$storeId}", 'contact', 3600);
         $this->checkRateLimit("contact:{$storeId}:" . strtolower($email), 'contact', 3600);
 
         try {
@@ -134,7 +151,11 @@ class ContactFormProcessor extends \Maho\ApiPlatform\Processor
         } catch (HttpException $e) {
             throw $e;
         } catch (\Exception $e) {
+            // Fail closed: a transport/decoding error (timeout, DNS, provider
+            // outage) must not let the submission through unverified, otherwise
+            // an attacker who can disrupt the verify endpoint bypasses CAPTCHA.
             \Mage::logException($e);
+            throw new HttpException(503, 'CAPTCHA verification is temporarily unavailable. Please try again later.');
         }
     }
 

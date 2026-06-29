@@ -16,7 +16,7 @@ use Maho\ApiPlatform\Service\StoreContext;
 use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 
 /**
- * Cart State Processor - Handles cart mutations for API Platform
+ * Cart State Processor - Handles cart mutations for API Platform.
  */
 final class CartProcessor extends \Maho\ApiPlatform\Processor
 {
@@ -41,16 +41,7 @@ final class CartProcessor extends \Maho\ApiPlatform\Processor
         $operationName = $operation->getName();
 
         // Bridge REST request body into context args (GraphQL populates args natively)
-        if (empty($context['args']['input'])) {
-            $context['args']['input'] = [];
-            $request = $context['request'] ?? null;
-            if ($request instanceof \Symfony\Component\HttpFoundation\Request) {
-                $body = json_decode($request->getContent(), true);
-                if (is_array($body)) {
-                    $context['args']['input'] = $body;
-                }
-            }
-        }
+        $this->normalizeGraphQlInput($context);
 
         // Map uriVariables for sub-resource params. itemId is
         // declared in URI templates but not in the operation's
@@ -63,6 +54,14 @@ final class CartProcessor extends \Maho\ApiPlatform\Processor
             $rp = $req->attributes->get('_route_params') ?? [];
             if (isset($rp['itemId'])) {
                 $uriVariables['itemId'] = $rp['itemId'];
+            }
+        }
+        // Same fallback for the gift card {code} on DELETE /guest-carts/{id}/giftcards/{code}:
+        // it isn't in the operation's uriVariables map, so recover it from the route params.
+        if (!isset($uriVariables['code']) && $req instanceof \Symfony\Component\HttpFoundation\Request) {
+            $rp = $req->attributes->get('_route_params') ?? [];
+            if (isset($rp['code'])) {
+                $uriVariables['code'] = $rp['code'];
             }
         }
         // Map uriVariables for sub-resource params
@@ -79,17 +78,20 @@ final class CartProcessor extends \Maho\ApiPlatform\Processor
             'addToCart', 'add_guest_item', 'add_cart_item' => $this->addItemToCart($context, $uriVariables),
             'updateCartItemQty', 'update_guest_item', 'update_cart_item' => $this->updateCartItem($context, $uriVariables),
             'removeCartItem', 'remove_guest_item', 'remove_cart_item' => $this->removeItemFromCart($context, $uriVariables),
-            'setCartItemFulfillment' => $this->setCartItemFulfillment($context, $uriVariables),
-            'applyCouponToCart', 'apply_guest_coupon' => $this->applyCouponToCart($context, $uriVariables),
-            'removeCouponFromCart', 'remove_guest_coupon' => $this->removeCouponFromCart($context, $uriVariables),
+            'applyCouponToCart', 'apply_guest_coupon', 'apply_my_coupon' => $this->applyCouponToCart($context, $uriVariables),
+            'removeCouponFromCart', 'remove_guest_coupon', 'remove_my_coupon' => $this->removeCouponFromCart($context, $uriVariables),
             'setShippingAddressOnCart' => $this->setShippingAddressOnCart($context, $uriVariables),
             'setBillingAddressOnCart' => $this->setBillingAddressOnCart($context, $uriVariables),
             'get_guest_shipping', 'get_my_shipping' => $this->getShippingMethodsForCart($context, $uriVariables),
             'setShippingMethodOnCart' => $this->setShippingMethodOnCart($context, $uriVariables),
             'setPaymentMethodOnCart' => $this->setPaymentMethodOnCart($context, $uriVariables),
             'assignCustomerToCart' => $this->assignCustomerToCart($context),
-            'applyGiftcardToCart', 'apply_guest_giftcard' => $this->applyGiftcardToCart($context, $uriVariables),
-            'removeGiftcardFromCart', 'remove_guest_giftcard' => $this->removeGiftcardFromCart($context, $uriVariables),
+            'applyGiftcardToCart', 'apply_guest_giftcard', 'apply_my_giftcard' => $this->applyGiftcardToCart($context, $uriVariables),
+            'removeGiftcardFromCart', 'remove_guest_giftcard', 'remove_my_giftcard' => $this->removeGiftcardFromCart($context, $uriVariables),
+            'setGiftMessage', 'set_my_cart_gift_message', 'set_my_item_gift_message',
+            'set_guest_cart_gift_message', 'set_guest_item_gift_message' => $this->setGiftMessage($context, $uriVariables),
+            'removeGiftMessage', 'remove_my_cart_gift_message', 'remove_my_item_gift_message',
+            'remove_guest_cart_gift_message', 'remove_guest_item_gift_message' => $this->removeGiftMessage($context, $uriVariables),
             default => $data instanceof Cart ? $data : new Cart(),
         };
     }
@@ -110,10 +112,28 @@ final class CartProcessor extends \Maho\ApiPlatform\Processor
             $quote,
             $byMasked,
             $this->getAuthenticatedCustomerId(),
-            $this->isAdmin() || $this->isApiUser(),
+            $this->isPrivilegedCartActor(),
         );
 
         return $quote;
+    }
+
+    /**
+     * Whether the caller may bypass cart ownership and act on any cart.
+     *
+     * Admins are gated upstream by AdminAclListener (Cart::ADMIN_RESOURCE), so
+     * they're trusted here. A service token is trusted only when it actually
+     * holds the carts/write grant: a bare service-account token without it is
+     * treated as an ordinary caller and can't reach arbitrary carts through the
+     * enumerable numeric /carts/{id} path. This closes the gap left by the
+     * overridden process() bypassing the base Processor's requirePermission().
+     */
+    private function isPrivilegedCartActor(): bool
+    {
+        if ($this->isAdmin()) {
+            return true;
+        }
+        return $this->isApiUser() && $this->getAuthorizedUser()->hasPermission('carts/write');
     }
 
     /**
@@ -135,7 +155,7 @@ final class CartProcessor extends \Maho\ApiPlatform\Processor
      * Create a cart for the authenticated REST caller.
      *
      * The /carts POST operation can only be reached when the firewall has
-     * already established a ROLE_USER, ROLE_ADMIN, or ROLE_API_USER token
+     * already established a customer (ROLE_CUSTOMER), admin (ROLE_ADMIN), or service-account token
      * (see security expression on the Cart resource). We resolve the customer
      * id from the auth context rather than from the request body so a
      * customer can't try to provision a cart against someone else's account.
@@ -158,7 +178,6 @@ final class CartProcessor extends \Maho\ApiPlatform\Processor
         $args = $context['args']['input'] ?? [];
         $sku = $args['sku'] ?? '';
         $qty = (float) ($args['qty'] ?? 1);
-        $fulfillmentType = strtoupper($args['fulfillmentType'] ?? 'SHIP');
 
         // Build buy request options
         $buyOptions = [];
@@ -180,19 +199,6 @@ final class CartProcessor extends \Maho\ApiPlatform\Processor
 
         $quote = $this->resolveAndVerify($context, $uriVariables);
         $quote = $this->cartService->addItem($quote, $sku, $qty, $buyOptions);
-
-        // Set fulfillment type on the newly added item
-        if ($fulfillmentType !== 'SHIP') {
-            $addedItem = null;
-            foreach ($quote->getAllVisibleItems() as $item) {
-                if ($item->getSku() === $sku) {
-                    $addedItem = $item;
-                }
-            }
-            if ($addedItem) {
-                $this->cartService->setItemFulfillmentType($quote, (int) $addedItem->getId(), $fulfillmentType);
-            }
-        }
 
         return $this->cartMapper->mapQuoteToCart($quote, false);
     }
@@ -234,24 +240,6 @@ final class CartProcessor extends \Maho\ApiPlatform\Processor
         return $this->cartMapper->mapQuoteToCart($quote, false);
     }
 
-    /**
-     * Set fulfillment type for a cart item
-     */
-    private function setCartItemFulfillment(array $context, array $uriVariables): Cart
-    {
-        $args = $context['args']['input'] ?? [];
-        $itemId = $args['itemId'] ?? $uriVariables['itemId'] ?? null;
-        $fulfillmentType = $args['fulfillmentType'] ?? 'SHIP';
-
-        if (!$itemId) {
-            throw new \RuntimeException('Item ID is required');
-        }
-
-        $quote = $this->resolveAndVerify($context, $uriVariables);
-        $quote = $this->cartService->setItemFulfillmentType($quote, (int) $itemId, $fulfillmentType);
-
-        return $this->cartMapper->mapQuoteToCart($quote, false);
-    }
 
     /**
      * Apply coupon code to cart
@@ -263,6 +251,14 @@ final class CartProcessor extends \Maho\ApiPlatform\Processor
 
         if (!$couponCode) {
             throw new \RuntimeException('Coupon code is required');
+        }
+
+        // Throttle anonymous/customer callers by IP: applying a coupon to a cart
+        // is otherwise an unauthenticated oracle for enumerating auto-generated
+        // coupon batches, the same risk the /coupons/validate endpoint guards.
+        // POS/API callers are exempt (legitimate high-volume checkout).
+        if (!$this->isAdmin() && !$this->isApiUser()) {
+            $this->checkRateLimitByIp('cart_coupon', 'coupon_validate', 60);
         }
 
         $quote = $this->resolveAndVerify($context, $uriVariables);
@@ -407,7 +403,7 @@ final class CartProcessor extends \Maho\ApiPlatform\Processor
         $requestedCustomerId = $args['customerId'] ?? null;
 
         // Admin/POS users can assign any customer to any cart
-        if ($this->isAdmin() || $this->isApiUser()) {
+        if ($this->isPrivilegedCartActor()) {
             if (!$requestedCustomerId) {
                 throw new \RuntimeException('Customer ID is required');
             }
@@ -477,6 +473,49 @@ final class CartProcessor extends \Maho\ApiPlatform\Processor
         $quote = $this->cartService->removeGiftcard($quote, $giftcardCode);
 
         return $this->cartMapper->mapQuoteToCart($quote, false);
+    }
+
+    /**
+     * Set the gift message on the cart, or on a single item when an itemId is
+     * present (URI sub-resource or `itemId` arg).
+     */
+    private function setGiftMessage(array $context, array $uriVariables): Cart
+    {
+        $args = $context['args']['input'] ?? [];
+        $itemId = $this->resolveGiftMessageItemId($args, $uriVariables);
+        $sender = trim((string) ($args['sender'] ?? ''));
+        $recipient = trim((string) ($args['recipient'] ?? ''));
+        $message = (string) ($args['message'] ?? '');
+
+        $quote = $this->resolveAndVerify($context, $uriVariables);
+        $quote = $this->cartService->setGiftMessage($quote, $itemId, $sender, $recipient, $message);
+
+        return $this->cartMapper->mapQuoteToCart($quote, false);
+    }
+
+    /**
+     * Remove the gift message from the cart, or from a single item.
+     */
+    private function removeGiftMessage(array $context, array $uriVariables): Cart
+    {
+        $args = $context['args']['input'] ?? [];
+        $itemId = $this->resolveGiftMessageItemId($args, $uriVariables);
+
+        $quote = $this->resolveAndVerify($context, $uriVariables);
+        $quote = $this->cartService->removeGiftMessage($quote, $itemId);
+
+        return $this->cartMapper->mapQuoteToCart($quote, false);
+    }
+
+    /**
+     * Resolve the optional target item id for a gift-message operation. Present
+     * for item-level endpoints (URI {itemId} or GraphQL itemId arg), null for
+     * cart-level. process() already bridges the {itemId} route param into args.
+     */
+    private function resolveGiftMessageItemId(array $args, array $uriVariables): ?int
+    {
+        $itemId = $args['itemId'] ?? $uriVariables['itemId'] ?? null;
+        return $itemId !== null && $itemId !== '' ? (int) $itemId : null;
     }
 
     /**

@@ -3,7 +3,6 @@
 /**
  * SPDX-FileCopyrightText: 2026 Maho <https://mahocommerce.com>
  * SPDX-License-Identifier: OSL-3.0
- * @package Maho
  */
 
 declare(strict_types=1);
@@ -35,8 +34,6 @@ use Attribute;
  *   - `mahoLabel`         ← title-cased mahoId
  *   - `mahoSection`       ← module segment of the namespace ('Mage\Catalog\Api\…' → 'Catalog')
  *   - `mahoOperations`    ← per-verb default labels for verbs present in `operations: [...]`
- *   - `mahoRestSegments`  ← `[$mahoId]` (augmented by your override)
- *   - `mahoGraphQlFields` ← camelCase `name`s from `graphQlOperations` (augmented by your override)
  *   - `mahoPublicRead`    ← `true` when every read operation has `security: 'true'`
  *
  * Set them explicitly only when defaults are wrong. `mahoCustomerScoped` has
@@ -55,8 +52,9 @@ class ApiResource extends BaseApiResource
     /**
      * Mirrors `ApiPlatform\Metadata\ApiResource::__construct` parameter-by-parameter
      * and forwards them to `parent::__construct` so API Platform sees the same
-     * configuration. Maho-specific fields come *after* every parent parameter so
-     * positional usage (rare) still maps cleanly to the parent contract.
+     * configuration. Maho-specific fields are declared *first* so they surface at
+     * the top of IDE autocomplete and usage blocks; this doesn't affect forwarding,
+     * which is done by name (see `get_defined_vars()` below), not by position.
      *
      * If API Platform adds a new constructor parameter we haven't mirrored here,
      * `tests/Backend/Integration/ApiPlatform/ApiResourceConstructorParityTest`
@@ -111,21 +109,6 @@ class ApiResource extends BaseApiResource
      *   for each entry, so write it action-oriented ("View cart, add/remove
      *   items, …"). No equivalent in API Platform, must be set explicitly.
      *
-     * @param string[]|null $mahoRestSegments
-     *   Additional top-level URL path segments that should resolve to this
-     *   resource for permission checks. The default is `[$mahoId]` itself,
-     *   `mahoRestSegments` is **augmenting**, so declare only the *extra*
-     *   segments (e.g. Cart adds `'guest-carts'` because both `/carts/*` and
-     *   `/guest-carts/*` map to the cart resource).
-     *
-     * @param string[]|null $mahoGraphQlFields
-     *   Additional GraphQL field names that should resolve to this resource for
-     *   permission checks. Auto-derived from `graphQlOperations[].name`,
-     *   filtering out internal snake_case identifiers (`item_query`,
-     *   `add_cart_item`). Augmenting, declare only fields the compiler can't
-     *   see, e.g. handler-defined fields in `*MutationHandler` / `*QueryHandler`
-     *   classes outside the DTO.
-     *
      * @param mixed $operations
      *
      * @phpstan-param mixed $rules
@@ -141,8 +124,6 @@ class ApiResource extends BaseApiResource
         public ?array $mahoOperations = null,
         public ?bool $mahoPublicRead = null,
         public bool $mahoCustomerScoped = false,
-        public ?array $mahoRestSegments = null,
-        public ?array $mahoGraphQlFields = null,
         // ---- Mirror of ApiPlatform\Metadata\ApiResource constructor ----
         ?string $uriTemplate = null,
         ?string $shortName = null,
@@ -234,8 +215,6 @@ class ApiResource extends BaseApiResource
             $parentArgs['mahoOperations'],
             $parentArgs['mahoPublicRead'],
             $parentArgs['mahoCustomerScoped'],
-            $parentArgs['mahoRestSegments'],
-            $parentArgs['mahoGraphQlFields'],
         );
         parent::__construct(...$parentArgs);
     }

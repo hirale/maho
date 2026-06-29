@@ -51,21 +51,21 @@ use Symfony\Component\Serializer\Attribute\Groups;
         new Post(
             uriTemplate: '/products',
             processor: ProductProcessor::class,
-            security: "is_granted('ROLE_API_USER')",
+            security: "is_granted('ROLE_ADMIN') or is_granted('products/write')",
             description: 'Creates a new product',
             normalizationContext: ['groups' => ['product:read', 'product:detail']],
         ),
         new Put(
             uriTemplate: '/products/{id}',
             processor: ProductProcessor::class,
-            security: "is_granted('ROLE_API_USER')",
+            security: "is_granted('ROLE_ADMIN') or is_granted('products/write')",
             description: 'Updates a product',
             normalizationContext: ['groups' => ['product:read', 'product:detail']],
         ),
         new Delete(
             uriTemplate: '/products/{id}',
             processor: ProductProcessor::class,
-            security: "is_granted('ROLE_API_USER')",
+            security: "is_granted('ROLE_ADMIN') or is_granted('products/delete')",
             description: 'Deletes a product',
         ),
     ],
@@ -88,11 +88,13 @@ use Symfony\Component\Serializer\Attribute\Groups;
             security: 'true',
         ),
         new Query(
+            security: 'true',
             name: 'product',
             description: 'Get a product by ID',
             normalizationContext: ['groups' => ['product:read', 'product:detail']],
         ),
         new QueryCollection(
+            security: 'true',
             name: 'products',
             args: [
                 'search' => ['type' => 'String', 'description' => 'Search query'],
@@ -108,6 +110,7 @@ use Symfony\Component\Serializer\Attribute\Groups;
             description: 'Get products with filtering and sorting',
         ),
         new Query(
+            security: 'true',
             name: 'productBySku',
             args: ['sku' => ['type' => 'String!']],
             description: 'Get a product by SKU',
@@ -115,6 +118,7 @@ use Symfony\Component\Serializer\Attribute\Groups;
             normalizationContext: ['groups' => ['product:read', 'product:detail']],
         ),
         new Query(
+            security: 'true',
             name: 'productByBarcode',
             args: ['barcode' => ['type' => 'String!']],
             description: 'Get a product by barcode',
@@ -122,6 +126,7 @@ use Symfony\Component\Serializer\Attribute\Groups;
             normalizationContext: ['groups' => ['product:read', 'product:detail']],
         ),
         new QueryCollection(
+            security: 'true',
             name: 'categoryProducts',
             args: [
                 'categoryId' => ['type' => 'Int!', 'description' => 'Category ID'],
@@ -190,7 +195,7 @@ class Product extends CrudResource
     public string $status = 'enabled';
 
     #[Groups(['product:read'])]
-    #[ApiProperty(description: 'Visibility: not_visible, catalog, search, catalog_search', writable: false, extraProperties: ['computed' => true])]
+    #[ApiProperty(description: 'Visibility: not_visible, catalog, search, catalog_search')]
     public ?string $visibility = null;
 
     #[Groups(['product:read'])]
@@ -213,12 +218,16 @@ class Product extends CrudResource
     #[ApiProperty(description: 'Minimum price (useful for bundles/grouped)', writable: false, extraProperties: ['computed' => true])]
     public ?float $minimalPrice = null;
 
+    #[Groups(['product:read'])]
+    #[ApiProperty(description: 'Currency code for all price fields', writable: false, extraProperties: ['computed' => true])]
+    public string $currency = '';
+
     #[Groups(['product:detail'])]
     #[ApiProperty(description: 'Tier pricing thresholds', writable: false, extraProperties: ['computed' => true])]
     public array $tierPrices = [];
 
     #[Groups(['product:read'])]
-    #[ApiProperty(description: 'Available stock quantity', writable: false, extraProperties: ['computed' => true])]
+    #[ApiProperty(description: 'Available stock quantity')]
     public ?float $stockQty = null;
 
     #[Groups(['product:read'])]
@@ -226,7 +235,7 @@ class Product extends CrudResource
     public ?float $weight = null;
 
     #[Groups(['product:read'])]
-    #[ApiProperty(description: 'Product barcode (EAN/UPC)', writable: false, extraProperties: ['computed' => true])]
+    #[ApiProperty(description: 'Product barcode (EAN/UPC)')]
     public ?string $barcode = null;
 
     #[Groups(['product:read'])]
@@ -242,7 +251,7 @@ class Product extends CrudResource
     public ?string $thumbnailUrl = null;
 
     #[Groups(['product:read'])]
-    #[ApiProperty(description: 'Category IDs this product belongs to', writable: false, extraProperties: ['computed' => true])]
+    #[ApiProperty(description: 'Category IDs this product belongs to')]
     public array $categoryIds = [];
 
     #[Groups(['product:read'])]
@@ -335,12 +344,24 @@ class Product extends CrudResource
     #[ApiProperty(description: 'Website IDs for product assignment', readable: false)]
     public ?array $websiteIds = null;
 
-    #[ApiProperty(description: 'Whether product is enabled', writable: false, extraProperties: ['computed' => true])]
+    #[ApiProperty(description: 'Whether product is enabled (write to enable/disable; read reflects saved state)')]
     public ?bool $isActive = null;
 
     /** @var array|null Stock data: {qty: float, is_in_stock: bool} */
     #[ApiProperty(description: 'Stock data for write operations', readable: false)]
     public ?array $stockData = null;
+
+    #[Groups(['product:read'])]
+    #[ApiProperty(description: 'Attribute set ID', extraProperties: ['modelField' => 'attribute_set_id'])]
+    public ?int $attributeSetId = null;
+
+    #[Groups(['product:read'])]
+    #[ApiProperty(description: 'Tax class ID', extraProperties: ['modelField' => 'tax_class_id'])]
+    public ?int $taxClassId = null;
+
+    /** @var array<string, mixed>|null Arbitrary EAV attributes to set: {"attribute_code": value} (write only) */
+    #[ApiProperty(description: 'Arbitrary EAV attributes to set: {"attribute_code": value}', readable: false)]
+    public ?array $customAttributesWrite = null;
 
     #[Groups(['product:read'])]
     #[ApiProperty(description: 'Module-provided extension data')]
@@ -355,6 +376,13 @@ class Product extends CrudResource
         $dto->status = (int) $model->getData('status') === \Mage_Catalog_Model_Product_Status::STATUS_ENABLED
             ? 'enabled' : 'disabled';
         $dto->isActive = $dto->status === 'enabled';
+
+        $dto->currency = \Mage::app()->getStore()->getCurrentCurrencyCode();
+
+        $dto->attributeSetId = $model->getData('attribute_set_id') !== null
+            ? (int) $model->getData('attribute_set_id') : null;
+        $dto->taxClassId = $model->getData('tax_class_id') !== null
+            ? (int) $model->getData('tax_class_id') : null;
 
         $dto->visibility = match ((int) $model->getData('visibility')) {
             \Mage_Catalog_Model_Product_Visibility::VISIBILITY_NOT_VISIBLE => 'not_visible',

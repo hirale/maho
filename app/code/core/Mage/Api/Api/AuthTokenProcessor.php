@@ -106,49 +106,13 @@ class AuthTokenProcessor extends \Maho\ApiPlatform\Processor
 
             if ($guestCartMaskedId && is_string($guestCartMaskedId) && preg_match('/^[a-f0-9]{32}$/i', $guestCartMaskedId)) {
                 try {
-                    $guestCart = $this->cartService->getCart(null, $guestCartMaskedId);
-
-                    if ($guestCart && $guestCart->getId() && !$guestCart->getCustomerId()) {
-                        $customerCart = \Mage::getModel('sales/quote')
-                            ->setSharedStoreIds([\Mage::app()->getStore()->getId()])
-                            ->loadByCustomer((int) $customer->getId());
-
-                        if (!$customerCart->getId()) {
-                            $customerCart = \Mage::getModel('sales/quote');
-                            $customerCart->setStoreId(\Mage::app()->getStore()->getId());
-                            $customerCart->assignCustomer($customer);
-                            $customerCart->setIsActive(1);
-                            $customerCart->save();
-                        }
-
-                        $customerCart->merge($guestCart);
-
-                        // Import customer default addresses so shipping quotes work on cart page
-                        $defaultShipping = $customer->getDefaultShippingAddress();
-                        if ($defaultShipping && $defaultShipping->getId()) {
-                            $shippingAddress = $customerCart->getShippingAddress();
-                            if (!$shippingAddress->getFirstname()) {
-                                $shippingAddress->importCustomerAddress($defaultShipping);
-                                $shippingAddress->setSaveInAddressBook(0);
-                            }
-                        }
-                        $defaultBilling = $customer->getDefaultBillingAddress();
-                        if ($defaultBilling && $defaultBilling->getId()) {
-                            $billingAddress = $customerCart->getBillingAddress();
-                            if (!$billingAddress->getFirstname()) {
-                                $billingAddress->importCustomerAddress($defaultBilling);
-                                $billingAddress->setSaveInAddressBook(0);
-                            }
-                        }
-
-                        $customerCart->collectTotals();
-                        $customerCart->save();
-
-                        $guestCart->setIsActive(0);
-                        $guestCart->save();
-
-                        $cartId = (int) $customerCart->getId();
-                    }
+                    // Delegate to CartService::mergeCarts, which enforces the full
+                    // guest-cart ownership guard (rejecting a masked ID resolving
+                    // to another customer's cart), re-collects totals correctly
+                    // (setTotalsCollectedFlag(false) before collectTotals), and
+                    // deactivates the guest cart atomically.
+                    $customerCart = $this->cartService->mergeCarts($guestCartMaskedId, (int) $customer->getId());
+                    $cartId = (int) $customerCart->getId();
                 } catch (\Exception $e) {
                     \Mage::log('Cart merge failed: ' . $e->getMessage(), \Mage::LOG_WARNING);
                 }
@@ -259,16 +223,20 @@ class AuthTokenProcessor extends \Maho\ApiPlatform\Processor
                 $read->select()->from($table)->where('client_id = ?', $clientId),
             );
 
-            if (!$row) {
+            // Always run password_verify (constant cost) even when the client_id
+            // is unknown, using a dummy hash. This keeps the timing and the error
+            // message identical whether the row is missing or the secret is wrong,
+            // so a valid client_id can't be enumerated via response differences.
+            $hash = $row['client_secret'] ?? '$2y$12$RlGJvrrS3GC1gKQvcwvjHedpfOFOSifqxMHE5umNj0nelSZsQqdYO';
+            $secretValid = password_verify($clientSecret, $hash);
+
+            if (!$row || !$secretValid) {
                 throw new UnauthorizedHttpException('Bearer', 'Invalid client credentials');
             }
 
+            // Only disclose account state once the secret is proven correct.
             if (!(int) $row['is_active']) {
                 throw new UnauthorizedHttpException('Bearer', 'API user account is inactive');
-            }
-
-            if (!password_verify($clientSecret, $row['client_secret'])) {
-                throw new UnauthorizedHttpException('Bearer', 'Invalid client credentials');
             }
 
             $apiUser = \Mage::getModel('api/user')->load($row['user_id']);
@@ -296,16 +264,22 @@ class AuthTokenProcessor extends \Maho\ApiPlatform\Processor
         try {
             $apiUser = \Mage::getModel('api/user')->loadByUsername($username);
 
-            if (!$apiUser->getId()) {
+            // Always run the hash check (constant cost) even when the username is
+            // unknown, using a dummy hash. This keeps the timing and the error
+            // message identical whether the user is missing or the key is wrong,
+            // so a valid username can't be enumerated via response differences.
+            $storedHash = $apiUser->getId()
+                ? (string) $apiUser->getApiKey()
+                : '$2y$12$RlGJvrrS3GC1gKQvcwvjHedpfOFOSifqxMHE5umNj0nelSZsQqdYO';
+            $keyValid = \Mage::helper('core')->validateHash($apiKey, $storedHash);
+
+            if (!$apiUser->getId() || !$keyValid) {
                 throw new UnauthorizedHttpException('Bearer', 'Invalid API credentials');
             }
 
+            // Only disclose account state once the key is proven correct.
             if (!(int) $apiUser->getIsActive()) {
                 throw new UnauthorizedHttpException('Bearer', 'API user account is inactive');
-            }
-
-            if (!\Mage::helper('core')->validateHash($apiKey, $apiUser->getApiKey())) {
-                throw new UnauthorizedHttpException('Bearer', 'Invalid API credentials');
             }
 
             return $this->generateApiUserTokenResponse($apiUser);
@@ -346,6 +320,8 @@ class AuthTokenProcessor extends \Maho\ApiPlatform\Processor
 
         $tokenString = substr($authHeader, 7);
 
+        $this->checkRateLimitByIp('refresh_token', 'auth_token_ip', 60);
+
         try {
             $payload = $this->jwtService->decodeToken($tokenString);
 
@@ -357,7 +333,9 @@ class AuthTokenProcessor extends \Maho\ApiPlatform\Processor
             }
 
             if (!isset($payload->customer_id)) {
-                throw new UnauthorizedHttpException('Bearer', 'Token does not contain customer information');
+                // Refresh is only defined for customer tokens. Admin and API-user
+                // integrations must re-authenticate with their own grant instead.
+                throw new UnauthorizedHttpException('Bearer', 'Token refresh is only supported for customer tokens; re-authenticate to obtain a new token');
             }
 
             $customer = \Mage::getModel('customer/customer')->load($payload->customer_id);
@@ -372,8 +350,11 @@ class AuthTokenProcessor extends \Maho\ApiPlatform\Processor
                 throw new UnauthorizedHttpException('Bearer', 'Customer account is inactive');
             }
 
-            $this->tokenBlacklist->revoke($payload->jti, (int) ($payload->exp ?? time() + 86400));
+            // Issue the replacement token first; only revoke the old one once we
+            // hold a valid new token, so a generation failure can't strand the
+            // customer with no usable token (forcing a full re-login).
             $newToken = $this->jwtService->generateCustomerToken($customer);
+            $this->tokenBlacklist->revoke($payload->jti, (int) ($payload->exp ?? time() + 86400));
 
             $dto = new AuthToken();
             $dto->token = $newToken;

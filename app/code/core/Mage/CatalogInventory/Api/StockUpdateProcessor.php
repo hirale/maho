@@ -11,18 +11,22 @@ declare(strict_types=1);
 namespace Mage\CatalogInventory\Api;
 
 use ApiPlatform\Metadata\Operation;
+use Maho\ApiPlatform\Trait\StockWriterTrait;
 use Symfony\Component\HttpKernel\Exception\BadRequestHttpException;
 use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 
 /**
- * Stock Update Processor - Fast direct SQL stock updates
+ * Stock Update Processor - Fast direct SQL stock updates.
  */
 final class StockUpdateProcessor extends \Maho\ApiPlatform\Processor
 {
+    use StockWriterTrait;
+
     #[\Override]
     public function process(mixed $data, Operation $operation, array $uriVariables = [], array $context = []): StockUpdate
     {
         $this->requireAdminOrApiUser('Stock update requires admin or API access');
+        $this->requireApiPermission('inventory/write');
         $operationName = $operation->getName();
 
         return match ($operationName) {
@@ -73,7 +77,7 @@ final class StockUpdateProcessor extends \Maho\ApiPlatform\Processor
             throw new BadRequestHttpException('SKU is required');
         }
 
-        $this->validateQty($qty);
+        $this->validateStockQty($qty);
 
         /** @var \Mage_Catalog_Model_Resource_Product $productResource */
         $productResource = \Mage::getResourceSingleton('catalog/product');
@@ -83,50 +87,23 @@ final class StockUpdateProcessor extends \Maho\ApiPlatform\Processor
             throw new NotFoundHttpException("Product not found for SKU: {$sku}");
         }
 
-        $resource = \Mage::getSingleton('core/resource');
-        $write = $resource->getConnection('core_write');
-        $table = $resource->getTableName('cataloginventory/stock_item');
-
-        // Get current stock for previousQty
-        $currentQty = (float) $write->fetchOne(
-            "SELECT qty FROM {$table} WHERE product_id = ? AND stock_id = 1",
-            [$productId],
-        );
-
-        // Build update data
-        $stockData = [];
-        $stockData['qty'] = $qty;
-        $stockData['manage_stock'] = ($manageStock !== null) ? ($manageStock ? 1 : 0) : 1;
-
-        if ($isInStock === null) {
-            $stockData['is_in_stock'] = $qty > 0 ? 1 : 0;
-        } else {
-            $stockData['is_in_stock'] = $isInStock ? 1 : 0;
-        }
-
-        // Check if stock item exists
-        $stockItemId = $write->fetchOne(
-            "SELECT item_id FROM {$table} WHERE product_id = ? AND stock_id = 1",
-            [$productId],
-        );
-
-        if ($stockItemId) {
-            $write->update($table, $stockData, 'item_id = ' . (int) $stockItemId);
-        } else {
-            $stockData['product_id'] = $productId;
-            $stockData['stock_id'] = 1;
-            $write->insert($table, $stockData);
-        }
+        $stockData = $this->buildStockData($qty, $isInStock, $manageStock);
+        $upsert = $this->upsertStockItemRow((int) $productId, $stockData);
 
         // Invalidate cache
         \Mage::app()->cleanCache(["API_PRODUCT_{$productId}"]);
+
+        // Keep the stock_status index in sync. Direct SQL writes bypass the stock
+        // item model's afterCommit reindex, so catalog listings and layered nav
+        // would otherwise show stale availability until a manual reindex.
+        $this->reindexStockStatus((int) $productId);
 
         $dto = new StockUpdate();
         $dto->sku = $sku;
         $dto->qty = $qty;
         $dto->isInStock = (bool) $stockData['is_in_stock'];
-        $dto->manageStock = (bool) $stockData['manage_stock'];
-        $dto->previousQty = $currentQty;
+        $dto->manageStock = (bool) $upsert['manageStock'];
+        $dto->previousQty = $upsert['previousQty'];
         $dto->success = true;
 
         return $dto;
@@ -153,7 +130,7 @@ final class StockUpdateProcessor extends \Maho\ApiPlatform\Processor
                 throw new BadRequestHttpException("Item at index {$index}: SKU is required");
             }
             $qty = (float) ($item['qty'] ?? 0);
-            $this->validateQty($qty);
+            $this->validateStockQty($qty);
 
             $productId = $productResource->getIdBySku($sku);
             if (!$productId) {
@@ -162,9 +139,7 @@ final class StockUpdateProcessor extends \Maho\ApiPlatform\Processor
             $skuToProductId[$sku] = $productId;
         }
 
-        $resource = \Mage::getSingleton('core/resource');
-        $write = $resource->getConnection('core_write');
-        $table = $resource->getTableName('cataloginventory/stock_item');
+        $write = \Mage::getSingleton('core/resource')->getConnection('core_write');
 
         $results = [];
         $cacheTags = [];
@@ -178,29 +153,8 @@ final class StockUpdateProcessor extends \Maho\ApiPlatform\Processor
                 $manageStock = isset($item['manageStock']) ? (bool) $item['manageStock'] : null;
                 $productId = $skuToProductId[$sku];
 
-                // Get current qty
-                $currentQty = (float) $write->fetchOne(
-                    "SELECT qty FROM {$table} WHERE product_id = ? AND stock_id = 1",
-                    [$productId],
-                );
-
-                $stockData = [];
-                $stockData['qty'] = $qty;
-                $stockData['manage_stock'] = ($manageStock !== null) ? ($manageStock ? 1 : 0) : 1;
-                $stockData['is_in_stock'] = ($isInStock ?? ($qty > 0)) ? 1 : 0;
-
-                $stockItemId = $write->fetchOne(
-                    "SELECT item_id FROM {$table} WHERE product_id = ? AND stock_id = 1",
-                    [$productId],
-                );
-
-                if ($stockItemId) {
-                    $write->update($table, $stockData, 'item_id = ' . (int) $stockItemId);
-                } else {
-                    $stockData['product_id'] = $productId;
-                    $stockData['stock_id'] = 1;
-                    $write->insert($table, $stockData);
-                }
+                $stockData = $this->buildStockData($qty, $isInStock, $manageStock);
+                $upsert = $this->upsertStockItemRow((int) $productId, $stockData);
 
                 $cacheTags[] = "API_PRODUCT_{$productId}";
 
@@ -208,8 +162,8 @@ final class StockUpdateProcessor extends \Maho\ApiPlatform\Processor
                 $result->sku = $sku;
                 $result->qty = $qty;
                 $result->isInStock = (bool) $stockData['is_in_stock'];
-                $result->manageStock = (bool) $stockData['manage_stock'];
-                $result->previousQty = $currentQty;
+                $result->manageStock = (bool) $upsert['manageStock'];
+                $result->previousQty = $upsert['previousQty'];
                 $result->success = true;
                 $results[] = $result;
             }
@@ -223,6 +177,13 @@ final class StockUpdateProcessor extends \Maho\ApiPlatform\Processor
         // Invalidate cache for all updated products
         \Mage::app()->cleanCache($cacheTags);
 
+        // Keep the stock_status index in sync for every updated product (see
+        // doSingleUpdate). Runs after commit so updateStatus() reads the persisted
+        // values.
+        foreach ($skuToProductId as $productId) {
+            $this->reindexStockStatus((int) $productId);
+        }
+
         // Return wrapper DTO with results
         $dto = new StockUpdate();
         $dto->sku = 'bulk';
@@ -232,10 +193,22 @@ final class StockUpdateProcessor extends \Maho\ApiPlatform\Processor
         return $dto;
     }
 
-    private function validateQty(float $qty): void
+    /**
+     * Recompute the cataloginventory_stock_status index for a product (and its
+     * configurable/grouped parents and children). The stock data is already
+     * persisted at this point, so a reindex failure is logged but not fatal.
+     */
+    private function reindexStockStatus(int $productId): void
     {
-        if ($qty < 0 || $qty > 99999999) {
-            throw new BadRequestHttpException('Quantity must be between 0 and 99999999');
+        try {
+            /** @var \Mage_CatalogInventory_Model_Stock_Status $stockStatus */
+            $stockStatus = \Mage::getSingleton('cataloginventory/stock_status');
+            $stockStatus->updateStatus($productId);
+        } catch (\Exception $e) {
+            \Mage::log(
+                "StockUpdateProcessor: failed to reindex stock status for product {$productId}: " . $e->getMessage(),
+                \Mage::LOG_ERROR,
+            );
         }
     }
 }

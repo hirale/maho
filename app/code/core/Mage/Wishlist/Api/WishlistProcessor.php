@@ -20,7 +20,7 @@ use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 use Symfony\Component\HttpKernel\Exception\AccessDeniedHttpException;
 
 /**
- * Wishlist State Processor
+ * Wishlist State Processor.
  */
 final class WishlistProcessor extends \Maho\ApiPlatform\Processor
 {
@@ -235,10 +235,23 @@ final class WishlistProcessor extends \Maho\ApiPlatform\Processor
         $quote = null;
         if ($cartId) {
             // Use CartService to load the cart properly (handles numeric or masked IDs)
-            if (is_numeric($cartId)) {
-                $quote = $this->cartService->getCart((int) $cartId);
-            } else {
+            $accessedByMaskedId = !is_numeric($cartId);
+            if ($accessedByMaskedId) {
                 $quote = $this->cartService->getCart(null, $cartId);
+            } else {
+                $quote = $this->cartService->getCart((int) $cartId);
+            }
+
+            // getCart() applies no ownership filtering, verify the caller owns
+            // this cart (or holds its masked guest token) before writing to it,
+            // otherwise a customer could push items into another customer's cart.
+            if ($quote && $quote->getId()) {
+                $this->cartService->verifyCartAccess(
+                    $quote,
+                    $accessedByMaskedId,
+                    $customerId,
+                    $this->isAdmin() || $this->isApiUser(),
+                );
             }
         }
 
@@ -261,7 +274,7 @@ final class WishlistProcessor extends \Maho\ApiPlatform\Processor
         // Add to cart using CartService
         try {
             $this->cartService->addItem($quote, $product->getSku(), (float) $qty);
-        } catch (\Exception $e) {
+        } catch (\Exception) {
             throw new BadRequestHttpException('Failed to add item to cart');
         }
 
@@ -286,9 +299,14 @@ final class WishlistProcessor extends \Maho\ApiPlatform\Processor
         $customerId = $this->requireAuthentication();
         $wishlist = $this->getWishlist($customerId);
 
-        // Get existing product IDs in wishlist
+        // Get existing product IDs in wishlist. Use a fresh unfiltered collection
+        // query: $wishlist->getItemsCollection() applies setVisibilityFilter(),
+        // which hides items whose product is currently disabled/invisible and
+        // would let us re-add them as duplicates below.
         $existingProductIds = [];
-        foreach ($wishlist->getItemsCollection() as $item) {
+        $existingItems = \Mage::getModel('wishlist/item')->getCollection()
+            ->setWishlist($wishlist);
+        foreach ($existingItems as $item) {
             $existingProductIds[] = (int) $item->getProductId();
         }
 

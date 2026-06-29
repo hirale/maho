@@ -14,7 +14,7 @@ use ApiPlatform\Metadata\Operation;
 use Maho\ApiPlatform\Service\StoreContext;
 
 /**
- * StoreConfig State Provider - Provides store configuration data
+ * StoreConfig State Provider - Provides store configuration data.
  */
 final class StoreConfigProvider extends \Maho\ApiPlatform\Provider
 {
@@ -46,8 +46,12 @@ final class StoreConfigProvider extends \Maho\ApiPlatform\Provider
         // Try cache (1-hour TTL)
         $cached = \Mage::app()->getCache()->load($cacheKey);
         if ($cached !== false) {
-            $data = json_decode($cached, true);
-            if ($data !== null) {
+            try {
+                $data = \Mage::helper('core')->jsonDecode($cached);
+            } catch (\JsonException) {
+                $data = null;
+            }
+            if (is_array($data)) {
                 return $this->arrayToDto($data);
             }
         }
@@ -91,16 +95,17 @@ final class StoreConfigProvider extends \Maho\ApiPlatform\Provider
         // Homepage CMS page identifier
         $dto->cmsHomePage = \Mage::getStoreConfig('web/default/cms_home_page', $storeId) ?: 'home';
 
+        // Dispatch before caching so observer mutations are persisted in the
+        // cached payload, not just on the instance returned this request.
+        \Mage::dispatchEvent('api_store_config_dto_build', ['dto' => $dto]);
+
         // Cache for 24 hours (store config rarely changes, auto-cleaned on save)
         \Mage::app()->getCache()->save(
-            json_encode($this->dtoToArray($dto)),
+            (string) \Mage::helper('core')->jsonEncode($this->dtoToArray($dto)),
             $cacheKey,
             ['API_STORE_CONFIG'],
             86400,
         );
-
-        \Mage::dispatchEvent('api_store_config_dto_build', ['dto' => $dto]);
-
 
         return $dto;
     }

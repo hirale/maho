@@ -16,10 +16,11 @@ use Mage\Checkout\Api\CartService;
 use Maho\ApiPlatform\Exception\NotFoundException;
 use Maho\ApiPlatform\Exception\ValidationException;
 use Maho\ApiPlatform\Security\AdminAcl;
+use Maho\ApiPlatform\Trait\AdminQuoteTrait;
 use Maho\Giftcard\Api\GiftCard;
 
 /**
- * Cart Mutation Handler
+ * Cart Mutation Handler.
  *
  * Handles all cart-related GraphQL operations for admin API.
  * Uses CartMapper::mapQuoteToCart() for DTO building to ensure
@@ -27,6 +28,8 @@ use Maho\Giftcard\Api\GiftCard;
  */
 class CartMutationHandler
 {
+    use AdminQuoteTrait;
+
     private CartService $cartService;
     private CartMapper $cartMapper;
 
@@ -73,12 +76,6 @@ class CartMutationHandler
         $cartId = $variables['cartId'] ?? $variables['input']['cartId'] ?? null;
         $sku = $variables['sku'] ?? $variables['input']['sku'] ?? null;
         $qty = $variables['qty'] ?? $variables['input']['qty'] ?? 1;
-        $fulfillmentType = strtoupper($variables['fulfillmentType'] ?? $variables['input']['fulfillmentType'] ?? 'SHIP');
-
-        // Validate fulfillment type
-        if (!in_array($fulfillmentType, ['SHIP', 'PICKUP'], true)) {
-            $fulfillmentType = 'SHIP';
-        }
 
         if (!$cartId) {
             throw ValidationException::requiredField('cartId');
@@ -91,20 +88,6 @@ class CartMutationHandler
             throw NotFoundException::cart($cartId);
         }
         $quote = $this->cartService->addItem($quote, $sku, (float) $qty);
-
-        // Set fulfillment type on the newly added item
-        if ($fulfillmentType !== 'SHIP') {
-            // Find the item we just added (by SKU, get the last one in case of duplicates)
-            $addedItem = null;
-            foreach ($quote->getAllVisibleItems() as $item) {
-                if ($item->getSku() === $sku) {
-                    $addedItem = $item;
-                }
-            }
-            if ($addedItem) {
-                $this->setItemFulfillmentType($addedItem, $fulfillmentType);
-            }
-        }
 
         return ['addToCart' => $this->mapCart($quote)];
     }
@@ -157,51 +140,6 @@ class CartMutationHandler
         return ['removeItem' => $this->mapCart($quote)];
     }
 
-    /**
-     * Handle setItemFulfillment mutation
-     */
-    public function handleSetItemFulfillment(array $variables): array
-    {
-        AdminAcl::checkResource(Cart::class);
-        $cartId = $variables['cartId'] ?? null;
-        $itemId = $variables['itemId'] ?? null;
-        $fulfillmentType = strtoupper($variables['fulfillmentType'] ?? 'SHIP');
-
-        if (!$cartId) {
-            throw ValidationException::requiredField('cartId');
-        }
-        if (!$itemId) {
-            throw ValidationException::requiredField('itemId');
-        }
-
-        // Validate fulfillment type
-        if (!in_array($fulfillmentType, ['SHIP', 'PICKUP'], true)) {
-            throw ValidationException::invalidValue('fulfillmentType', 'must be SHIP or PICKUP');
-        }
-
-        $quote = $this->cartService->getCart((int) $cartId);
-        if (!$quote) {
-            throw NotFoundException::cart($cartId);
-        }
-
-        // Find the item
-        $targetItem = null;
-        foreach ($quote->getAllVisibleItems() as $item) {
-            if ((int) $item->getId() === (int) $itemId) {
-                $targetItem = $item;
-                break;
-            }
-        }
-
-        if (!$targetItem) {
-            throw NotFoundException::cartItem((int) $itemId);
-        }
-
-        // Set the fulfillment type
-        $this->setItemFulfillmentType($targetItem, $fulfillmentType);
-
-        return ['setItemFulfillment' => $this->mapCart($quote)];
-    }
 
     /**
      * Handle applyCoupon mutation
@@ -226,9 +164,13 @@ class CartMutationHandler
         /** @var \Maho_Giftcard_Model_Giftcard $giftcard */
         $giftcard = \Mage::getModel('giftcard/giftcard')->loadByCode($couponCode);
         if ($giftcard->getId() && $giftcard->isValid()) {
-            // It's a valid gift card - apply it to quote via giftcard_codes field
-            $this->applyGiftcardToQuote($quote, $giftcard);
-            $quote->collectTotals()->save();
+            // It's a valid gift card - apply via the shared REST path so the
+            // website-scope and currency checks aren't bypassed.
+            try {
+                $this->cartService->applyGiftcard($quote, $couponCode);
+            } catch (\RuntimeException $e) {
+                throw ValidationException::invalidValue('couponCode', $e->getMessage());
+            }
             return ['applyCoupon' => $this->mapCart($quote)];
         }
 
@@ -308,10 +250,8 @@ class CartMutationHandler
         }
         return ['checkGiftCardBalance' => [
             'code' => $giftcard->getCode(),
-            'balance' => [
-                'value' => (float) $giftcard->getBalance(),
-                'formatted' => \Mage::helper('core')->currency($giftcard->getBalance(), true, false),
-            ],
+            'currency' => \Mage::app()->getStore()->getCurrentCurrencyCode(),
+            'balance' => (float) $giftcard->getBalance(),
             'status' => $giftcard->getStatus(),
             'isValid' => $giftcard->isValid(),
             'expiresAt' => $giftcard->getExpiresAt(),
@@ -340,18 +280,20 @@ class CartMutationHandler
             throw NotFoundException::cart($cartId);
         }
 
-        /** @var \Maho_Giftcard_Model_Giftcard $giftcard */
-        $giftcard = \Mage::getModel('giftcard/giftcard')->loadByCode($code);
-        if (!$giftcard->getId() || !$giftcard->isValid()) {
-            throw ValidationException::invalidValue('code', 'invalid or expired gift card');
+        // Reuse the REST path so website-scope, quote-currency balance, validity
+        // and duplicate checks stay in one place (CartService::applyGiftcard also
+        // collects totals and saves). Avoids the drift this handler had before.
+        try {
+            $this->cartService->applyGiftcard($quote, (string) $code, $amount);
+        } catch (\RuntimeException $e) {
+            throw ValidationException::invalidValue('code', $e->getMessage());
         }
 
-        $this->applyGiftcardToQuote($quote, $giftcard, $amount);
-        $quote->collectTotals()->save();
-
-        // Reload quote to get fresh totals
-        $quote = $this->cartService->getCart((int) $cartId);
-        return ['applyGiftcardToCart' => $this->mapCart($quote)];
+        // Reload quote to get fresh totals, falling back to the in-memory quote
+        // (already collected and saved by applyGiftcard) if the reload comes back
+        // empty, so mapCart() never receives null.
+        $reloaded = $this->cartService->getCart((int) $cartId);
+        return ['applyGiftcardToCart' => $this->mapCart($reloaded ?? $quote)];
     }
 
     /**
@@ -375,12 +317,22 @@ class CartMutationHandler
             throw NotFoundException::cart($cartId);
         }
 
-        $this->removeGiftcardFromQuote($quote, $code);
-        $quote->collectTotals()->save();
+        // Reuse the REST path so the giftcard_amount/base_giftcard_amount fields
+        // are zeroed and the totals-collected flag is reset before re-collecting
+        // (removeGiftcard also collects totals and saves). The previous inline
+        // removal only unset the code from the JSON blob, leaving a stale gift
+        // card discount on an already-collected quote.
+        try {
+            $this->cartService->removeGiftcard($quote, (string) $code);
+        } catch (\RuntimeException $e) {
+            throw ValidationException::invalidValue('code', $e->getMessage());
+        }
 
-        // Reload quote to get fresh totals
-        $quote = $this->cartService->getCart((int) $cartId);
-        return ['removeGiftcardFromCart' => $this->mapCart($quote)];
+        // Reload quote to get fresh totals, falling back to the in-memory quote
+        // (already collected and saved above) if the reload comes back empty, so
+        // mapCart() never receives null.
+        $reloaded = $this->cartService->getCart((int) $cartId);
+        return ['removeGiftcardFromCart' => $this->mapCart($reloaded ?? $quote)];
     }
 
     /**
@@ -394,12 +346,7 @@ class CartMutationHandler
             throw ValidationException::requiredField('cartId');
         }
 
-        // Load quote without store filtering for admin/POS context
-        $quote = \Mage::getModel('sales/quote')->loadByIdWithoutStore($cartId);
-
-        if (!$quote || !$quote->getId()) {
-            throw NotFoundException::cart($cartId);
-        }
+        $quote = $this->loadAdminQuote($cartId);
 
         if ($quote->getStoreId()) {
             \Mage::app()->setCurrentStore($quote->getStoreId());
@@ -414,6 +361,7 @@ class CartMutationHandler
 
         $shippingAddress->collectShippingRates();
         $rates = $shippingAddress->getGroupedAllShippingRates();
+        $currency = $quote->getQuoteCurrencyCode();
 
         $methods = [];
         foreach ($rates as $carrierRates) {
@@ -423,26 +371,20 @@ class CartMutationHandler
                     'carrierTitle' => $rate->getCarrierTitle(),
                     'methodCode' => $rate->getMethod(),
                     'methodTitle' => $rate->getMethodTitle(),
-                    'amount' => ['value' => (float) $rate->getPrice(), 'formatted' => \Mage::helper('core')->currency($rate->getPrice(), true, false)],
+                    'amount' => (float) $rate->getPrice(),
+                    'currency' => $currency,
                     'available' => !$rate->getErrorMessage(),
                     'errorMessage' => $rate->getErrorMessage(),
                 ];
             }
         }
-
-        // Ensure freeshipping for POS
-        $hasFreeShipping = false;
-        foreach ($methods as $m) {
-            if ($m['carrierCode'] === 'freeshipping') {
-                $hasFreeShipping = true;
-                break;
-            }
-        }
+        $hasFreeShipping = array_any($methods, fn($m) => $m['carrierCode'] === 'freeshipping');
         if (!$hasFreeShipping) {
             array_unshift($methods, [
                 'carrierCode' => 'freeshipping', 'carrierTitle' => 'Free Shipping',
                 'methodCode' => 'freeshipping', 'methodTitle' => 'POS In-Store Pickup',
-                'amount' => ['value' => 0, 'formatted' => '$0.00'],
+                'amount' => 0.0,
+                'currency' => $currency,
                 'available' => true, 'errorMessage' => null,
             ]);
         }
@@ -465,130 +407,11 @@ class CartMutationHandler
         $dto = $this->cartMapper->mapQuoteToCart($quote);
         $data = $dto->toArray();
 
-        // Add GraphQL-specific fields
-        $data['maskedId'] = base64_encode('cart_' . $quote->getId() . '_' . substr(md5($quote->getId() . $quote->getCreatedAt()), 0, 8));
+        // maskedId is the real, CSPRNG-generated masked_quote_id (set by CartMapper).
+        // Never derive it from the quote id, that would be reversible and guessable.
 
-        // Enrich items with fulfillment type (GraphQL-specific), align by item ID
-        $quoteItemsById = [];
-        foreach ($quote->getAllVisibleItems() as $item) {
-            $quoteItemsById[(int) $item->getId()] = $item;
-        }
-        foreach ($data['items'] as &$itemData) {
-            $itemId = (int) ($itemData['id'] ?? 0);
-            if (isset($quoteItemsById[$itemId])) {
-                $itemData['fulfillmentType'] = $this->getItemFulfillmentType($quoteItemsById[$itemId]);
-            }
-        }
-        unset($itemData);
-
-        // Add giftcard data (GraphQL-specific)
-        $data['appliedGiftcards'] = $this->mapAppliedGiftcards($quote);
-
+        // appliedGiftcards and per-item data are already populated by
+        // CartMapper::mapQuoteToCart(), so REST and GraphQL share one source.
         return $data;
-    }
-
-    /**
-     * Map applied gift cards from quote
-     */
-    private function mapAppliedGiftcards(\Mage_Sales_Model_Quote $quote): array
-    {
-        $giftcards = [];
-
-        // Get gift card data from quote's giftcard_codes field
-        $giftcardCodes = $quote->getGiftcardCodes();
-        if (!$giftcardCodes) {
-            return $giftcards;
-        }
-
-        $codesData = json_decode($giftcardCodes, true);
-        if (!is_array($codesData)) {
-            return $giftcards;
-        }
-
-        foreach ($codesData as $code => $appliedAmount) {
-            /** @var \Maho_Giftcard_Model_Giftcard $giftcard */
-            $giftcard = \Mage::getModel('giftcard/giftcard')->loadByCode((string) $code);
-            if ($giftcard->getId()) {
-                $giftcards[] = [
-                    'code' => $code,
-                    'appliedAmount' => [
-                        'value' => (float) $appliedAmount,
-                        'formatted' => \Mage::helper('core')->currency($appliedAmount, true, false),
-                    ],
-                    'balance' => [
-                        'value' => (float) $giftcard->getBalance(),
-                        'formatted' => \Mage::helper('core')->currency($giftcard->getBalance(), true, false),
-                    ],
-                ];
-            }
-        }
-
-        return $giftcards;
-    }
-
-    /**
-     * Apply a gift card to a quote by storing its code and amount in giftcard_codes
-     */
-    private function applyGiftcardToQuote(\Mage_Sales_Model_Quote $quote, \Maho_Giftcard_Model_Giftcard $giftcard, ?float $amount = null): void
-    {
-        $codesJson = $quote->getGiftcardCodes();
-        $codes = $codesJson ? (array) json_decode($codesJson, true) : [];
-
-        // Cap caller-supplied amount at the live balance: revalidateGiftcards()
-        // re-checks at order placement, but until then the inflated amount
-        // distorts every quote total and any pre-placement payment authorization.
-        $balance = (float) $giftcard->getBalance();
-        $applyAmount = $amount === null ? $balance : min((float) $amount, $balance);
-        $codes[$giftcard->getCode()] = $applyAmount;
-
-        $quote->setGiftcardCodes(json_encode($codes));
-    }
-
-    /**
-     * Remove a gift card from a quote by its code
-     */
-    private function removeGiftcardFromQuote(\Mage_Sales_Model_Quote $quote, string $code): void
-    {
-        $codesJson = $quote->getGiftcardCodes();
-        $codes = $codesJson ? (array) json_decode($codesJson, true) : [];
-
-        unset($codes[$code]);
-
-        $quote->setGiftcardCodes(empty($codes) ? null : json_encode($codes));
-    }
-
-    /**
-     * Set fulfillment type on a quote item using additional_data field
-     */
-    private function setItemFulfillmentType(\Mage_Sales_Model_Quote_Item $item, string $fulfillmentType): void
-    {
-        $additionalData = $item->getAdditionalData();
-        $data = $additionalData ? json_decode($additionalData, true) : [];
-
-        if (!is_array($data)) {
-            $data = [];
-        }
-
-        $data['fulfillment_type'] = $fulfillmentType;
-
-        $item->setAdditionalData(json_encode($data));
-        $item->save();
-    }
-
-    /**
-     * Get fulfillment type from a quote item's additional_data
-     */
-    private function getItemFulfillmentType(\Mage_Sales_Model_Quote_Item $item): string
-    {
-        $additionalData = $item->getAdditionalData();
-
-        if ($additionalData) {
-            $data = json_decode($additionalData, true);
-            if (is_array($data) && isset($data['fulfillment_type'])) {
-                return strtoupper($data['fulfillment_type']);
-            }
-        }
-
-        return 'SHIP'; // Default
     }
 }

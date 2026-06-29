@@ -85,7 +85,7 @@ class Kernel extends BaseKernel
                     \Mage::LOG_WARNING,
                 );
             }
-            $_ENV['CORS_ALLOW_ORIGIN'] = json_encode($origins, JSON_THROW_ON_ERROR);
+            $_ENV['CORS_ALLOW_ORIGIN'] = \Mage::helper('core')->jsonEncode($origins);
         }
     }
 
@@ -98,7 +98,8 @@ class Kernel extends BaseKernel
     /**
      * Symfony writes its compiled container/route/metadata cache here on first
      * request. The directory must be writable by the web user; deployment
-     * scripts should pre-warm it (see docs/API.md → Deployment Notes) so the
+     * scripts should pre-warm it (see https://mahocommerce.com/api/v2/extending/
+     * → Deployment Notes) so the
      * first /api/* request after a release doesn't pay container-compile cost.
      */
     #[\Override]
@@ -141,7 +142,7 @@ class Kernel extends BaseKernel
         // so the placeholder string reaches in_array() unresolved and
         // trips a TypeError. resolveEnvironmentVars() has already
         // populated $_ENV['CORS_ALLOW_ORIGIN'] with the JSON-encoded list.
-        $corsAllowOrigin = json_decode($_ENV['CORS_ALLOW_ORIGIN'] ?? '[]', true) ?: [];
+        $corsAllowOrigin = ((array) \Mage::helper('core')->jsonDecode($_ENV['CORS_ALLOW_ORIGIN'] ?? '[]')) ?: [];
 
         $container->extension('framework', [
             'secret' => '%env(APP_SECRET)%',
@@ -232,7 +233,7 @@ class Kernel extends BaseKernel
                 'allow_origin' => $corsAllowOrigin,
                 'allow_credentials' => false,
                 'allow_methods' => ['GET', 'OPTIONS', 'POST', 'PUT', 'PATCH', 'DELETE'],
-                'allow_headers' => ['Content-Type', 'Authorization', 'X-Requested-With'],
+                'allow_headers' => ['Content-Type', 'Authorization', 'X-Requested-With', 'X-Idempotency-Key'],
                 'expose_headers' => ['Link', 'Deprecation', 'Sunset'],
                 'max_age' => 3600,
             ],
@@ -240,7 +241,7 @@ class Kernel extends BaseKernel
                 '^/api/' => [
                     'allow_origin' => $corsAllowOrigin,
                     'allow_credentials' => false,
-                    'allow_headers' => ['Content-Type', 'Authorization', 'X-Requested-With', 'X-Store-Code'],
+                    'allow_headers' => ['Content-Type', 'Authorization', 'Accept', 'X-Requested-With', 'X-Store-Code', 'X-Idempotency-Key', 'X-Order-Token', 'If-None-Match'],
                     'allow_methods' => ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
                     'max_age' => 3600,
                 ],
@@ -248,17 +249,14 @@ class Kernel extends BaseKernel
         ]);
 
         $container->extension('security', [
-            // ROLE_ADMIN inherits ROLE_API_USER so admin tokens can reach the
-            // REST endpoints gated by ROLE_API_USER (products, categories,
-            // CMS, etc.), the listener AdminAclListener (default-deny via
-            // ADMIN_RESOURCE) is the actual gate, not the security
-            // expression. ROLE_USER is NOT inherited because customer-only
-            // endpoints (`/me`, `/me/orders`, etc.) shouldn't be reached by
-            // admin tokens at all; AdminAclListener default-denies those
-            // since they don't declare ADMIN_RESOURCE.
-            'role_hierarchy' => [
-                'ROLE_ADMIN' => ['ROLE_API_USER'],
-            ],
+            // No role hierarchy: authorization uses exactly two roles in the
+            // operation `security:` expressions — ROLE_CUSTOMER (customer, own data)
+            // and ROLE_ADMIN (admin, then gated per-resource by AdminAclListener
+            // via ADMIN_RESOURCE). API service accounts (ROLE_API_USER) are not
+            // matched by role at all; they're authorized by their granular
+            // `resource/op` permissions in ApiUserVoter. Admins are deliberately
+            // not granted ROLE_CUSTOMER, so customer-only `/me` endpoints stay out
+            // of reach (AdminAclListener also default-denies them).
             'password_hashers' => [
                 \Symfony\Component\Security\Core\User\PasswordAuthenticatedUserInterface::class => 'auto',
             ],
@@ -342,9 +340,11 @@ class Kernel extends BaseKernel
             ->decorate('api_platform.graphql.state_provider.read')
             ->arg('$inner', new Reference(GraphQl\IriToleranceProvider::class . '.inner'));
 
-        $services->set(EventListener\DefaultDenyListener::class)
-            ->arg('$resourceMetadataFactory', new Reference('api_platform.metadata.resource.metadata_collection_factory'))
-            ->tag('kernel.event_listener', ['event' => 'kernel.request', 'priority' => 28]);
+        // DefaultDenyListener is wired via its #[AsEventListener(priority: 5)]
+        // attribute (autoconfigured by the services loader above) so it runs
+        // after the security firewall (priority 8). It must NOT be re-tagged
+        // here: a second registration at a pre-firewall priority would see an
+        // empty token and 401 every authenticated request.
     }
 
     protected function configureRoutes(RoutingConfigurator $routes): void

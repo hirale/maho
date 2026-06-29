@@ -84,8 +84,14 @@ class OAuth2Authenticator extends AbstractAuthenticator
             throw new CustomUserMessageAuthenticationException('Invalid token: missing subject');
         }
 
+        // Every token issued by JwtService carries a jti (identifiedBy). Reject any
+        // token missing it so a token without a jti cannot skip the blacklist check.
+        if (!isset($payload->jti) || (string) $payload->jti === '') {
+            throw new CustomUserMessageAuthenticationException('Invalid token: missing token identifier');
+        }
+
         // Check token blacklist
-        if (isset($payload->jti) && $this->tokenBlacklist->isRevoked($payload->jti)) {
+        if ($this->tokenBlacklist->isRevoked((string) $payload->jti)) {
             throw new CustomUserMessageAuthenticationException('Token has been revoked');
         }
 
@@ -174,12 +180,20 @@ class OAuth2Authenticator extends AbstractAuthenticator
             if (!$apiUser->getId() || !(int) $apiUser->getIsActive()) {
                 throw new CustomUserMessageAuthenticationException('API user account is inactive or not found');
             }
+            // Re-read store scope from the DB rather than trusting the token's
+            // allowed_store_ids claim, so changes to the user's store restriction
+            // take effect immediately instead of waiting for the JWT to expire
+            // (mirrors the live permission re-read above). [] means unrestricted.
+            $apiUserStoreIds = array_map('intval', $this->jwtService->getApiUserAllowedStoreIds($apiUser));
             return new ApiUser(
                 identifier: (string) $payload->sub,
-                roles: ['ROLE_API_USER'],
+                // No role: service accounts are authorized by their granular
+                // `resource/op` permissions (via ApiUserVoter, keyed off
+                // apiUserId), not by a role matched in any security expression.
+                roles: [],
                 apiUserId: $apiUserId,
                 permissions: $this->jwtService->loadApiUserPermissions($apiUser),
-                allowedStoreIds: $allowedStoreIds,
+                allowedStoreIds: $apiUserStoreIds === [] ? null : $apiUserStoreIds,
             );
         }
 

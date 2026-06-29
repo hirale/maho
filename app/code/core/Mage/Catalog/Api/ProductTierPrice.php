@@ -11,15 +11,17 @@ declare(strict_types=1);
 namespace Mage\Catalog\Api;
 
 use ApiPlatform\Metadata\ApiProperty;
-use Maho\Config\ApiResource;
+use ApiPlatform\Metadata\ApiResource;
 use ApiPlatform\Metadata\Delete;
 use ApiPlatform\Metadata\GetCollection;
 use ApiPlatform\Metadata\Link;
 use ApiPlatform\Metadata\Put;
 
+// Writes are gated by products/write|delete in ProductTierPriceProcessor (a
+// product facet, not a separately-grantable resource), so this uses the plain
+// API Platform attribute and is intentionally absent from the permission registry.
 #[ApiResource(
-    mahoId: 'tier-prices',
-    mahoOperations: ['read' => 'View', 'write' => 'Manage'],
+    security: 'true',
     shortName: 'ProductTierPrice',
     description: 'Product tier prices (quantity-based pricing)',
     provider: ProductTierPriceProvider::class,
@@ -38,7 +40,7 @@ use ApiPlatform\Metadata\Put;
                 'productId' => new Link(fromClass: Product::class, identifiers: ['id']),
             ],
             processor: ProductTierPriceProcessor::class,
-            security: "is_granted('ROLE_API_USER')",
+            security: "is_granted('ROLE_ADMIN') or is_granted('products/write')",
             description: 'Replace all tier prices for a product',
         ),
         new Delete(
@@ -47,7 +49,7 @@ use ApiPlatform\Metadata\Put;
                 'productId' => new Link(fromClass: Product::class, identifiers: ['id']),
             ],
             processor: ProductTierPriceProcessor::class,
-            security: "is_granted('ROLE_API_USER')",
+            security: "is_granted('ROLE_ADMIN') or is_granted('products/delete')",
             description: 'Remove all tier prices from a product',
         ),
     ],

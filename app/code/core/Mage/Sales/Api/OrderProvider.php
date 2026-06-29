@@ -17,7 +17,7 @@ use Mage\Customer\Api\Address;
 use Symfony\Bundle\SecurityBundle\Security;
 
 /**
- * Order State Provider - Fetches order data for API Platform
+ * Order State Provider - Fetches order data for API Platform.
  */
 final class OrderProvider extends \Maho\ApiPlatform\Provider
 {
@@ -54,13 +54,17 @@ final class OrderProvider extends \Maho\ApiPlatform\Provider
         // token on a successful read so refreshing the page can't replay
         // analytics or expose the order to a later viewer.
         if ($operationName === 'get_order_by_token') {
+            // Public, unauthenticated endpoint: throttle by IP so the strong
+            // one-time token can't be brute-forced against a known increment ID.
+            $this->checkRateLimitByIp('guest_order_token', 'guest_order_lookup', 3600);
+
             $request = $context['request'] ?? null;
             $token = '';
             if ($request instanceof \Symfony\Component\HttpFoundation\Request) {
+                // Header only: a token in the query string would leak into web
+                // server / CDN access logs and Referer headers, surviving the
+                // one-time-use wipe below for the lifetime of those logs.
                 $token = (string) $request->headers->get('X-Order-Token', '');
-                if ($token === '') {
-                    $token = (string) $request->query->get('token', '');
-                }
             }
             $incrementId = (string) ($uriVariables['incrementId'] ?? '');
 
@@ -72,15 +76,6 @@ final class OrderProvider extends \Maho\ApiPlatform\Provider
             if (!$order) {
                 return null;
             }
-
-            // One-time use: clear the token so refreshing the success page
-            // doesn't re-fire analytics or re-expose the order.
-            $resource = \Mage::getSingleton('core/resource');
-            $resource->getConnection('core_write')->update(
-                $resource->getTableName('sales/order'),
-                ['guest_access_token' => null],
-                ['entity_id = ?' => $order->getId()],
-            );
 
             $dto = $this->mapToDto($order);
 
@@ -96,11 +91,26 @@ final class OrderProvider extends \Maho\ApiPlatform\Provider
                 }
             }
 
+            // One-time use: clear the token so refreshing the success page
+            // doesn't re-fire analytics or re-expose the order. Done only after
+            // the DTO is built so a mapping failure can't permanently strand the
+            // guest's access to their order.
+            $resource = \Mage::getSingleton('core/resource');
+            $resource->getConnection('core_write')->update(
+                $resource->getTableName('sales/order'),
+                ['guest_access_token' => null],
+                ['entity_id = ?' => $order->getId()],
+            );
+
             return $dto;
         }
 
         // Handle guestOrder query - get order by increment ID and access token
         if ($operationName === 'guestOrder') {
+            // Same public token-lookup surface as the REST path above; throttle
+            // by IP so the one-time token can't be brute-forced via GraphQL.
+            $this->checkRateLimitByIp('guest_order_token', 'guest_order_lookup', 3600);
+
             $incrementId = $context['args']['incrementId'] ?? null;
             $accessToken = $context['args']['accessToken'] ?? null;
 
@@ -113,7 +123,10 @@ final class OrderProvider extends \Maho\ApiPlatform\Provider
                 return null;
             }
 
-            $dto = $this->mapToDto($order, $accessToken);
+            // Don't echo the access token back: it's consumed below (one-time
+            // use), so returning it would only leak a dead token into response
+            // bodies, logs and caches. Mirrors the REST get_order_by_token path.
+            $dto = $this->mapToDto($order);
 
             // Issue an account-creation token if no customer exists for this email
             $orderEmail = $order->getCustomerEmail();
@@ -127,12 +140,24 @@ final class OrderProvider extends \Maho\ApiPlatform\Provider
                 }
             }
 
+            // One-time use: clear the token so it can't be replayed to re-expose
+            // the order. Mirrors the REST get_order_by_token path; done only after
+            // the DTO is built so a mapping failure can't strand the guest.
+            $resource = \Mage::getSingleton('core/resource');
+            $resource->getConnection('core_write')->update(
+                $resource->getTableName('sales/order'),
+                ['guest_access_token' => null],
+                ['entity_id = ?' => $order->getId()],
+            );
+
             return $dto;
         }
 
         // Handle customerOrders collection query
         if ($operationName === 'customerOrders') {
-            $customerId = $context['customer_id'] ?? null;
+            // Bind strictly to the authenticated JWT identity (mirrors getMyOrders).
+            // Never trust a request/context-supplied id here, that would be an IDOR.
+            $customerId = $this->getAuthenticatedCustomerId();
             if (!$customerId) {
                 return new TraversablePaginator(new \ArrayIterator([]), 1, 20, 0);
             }
@@ -179,7 +204,7 @@ final class OrderProvider extends \Maho\ApiPlatform\Provider
      * Check if current user can access the given order
      *
      * - Admins: full access
-     * - API users (ROLE_API_USER): full access (permission already checked by security.yaml)
+     * - API service accounts: full access (permission already checked by the operation security expression)
      * - Customers: own orders only
      */
     private function canAccessOrder(\Mage_Sales_Model_Order $order): bool
@@ -189,8 +214,11 @@ final class OrderProvider extends \Maho\ApiPlatform\Provider
             return true;
         }
 
-        // API users with orders/read permission can access any order
-        // (permission enforcement is handled by security.yaml + ApiUserVoter)
+        // API users with orders/read permission can access any order. The
+        // granular orders/read check is enforced upstream by the operation's
+        // `security: is_granted('orders/read')` expression (via ApiUserVoter)
+        // before this runs, so by the time we get here the key is already
+        // authorized to read orders.
         $user = $this->security->getUser();
         if ($user instanceof \Maho\ApiPlatform\Security\ApiUser && $user->isApiUser()) {
             return true;

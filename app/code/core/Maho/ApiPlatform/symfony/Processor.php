@@ -17,8 +17,11 @@ use Maho\ApiPlatform\Security\ApiUser;
 use Maho\ApiPlatform\Trait\ActivityLogTrait;
 use Maho\ApiPlatform\Trait\AuthenticationTrait;
 use Maho\ApiPlatform\Trait\ModelPersistenceTrait;
+use Maho\ApiPlatform\Trait\RateLimitTrait;
 use Maho\ApiPlatform\Trait\StoreAccessTrait;
 use Symfony\Bundle\SecurityBundle\Security;
+use Symfony\Component\HttpFoundation\Request;
+use Symfony\Component\HttpKernel\Exception\BadRequestHttpException;
 
 /**
  * Base class for all API state processors.
@@ -39,6 +42,7 @@ abstract class Processor implements ProcessorInterface
     use ModelPersistenceTrait;
     use ActivityLogTrait;
     use StoreAccessTrait;
+    use RateLimitTrait;
 
     protected ?string $modelAlias = null;
     protected ?string $writePermission = null;
@@ -131,39 +135,47 @@ abstract class Processor implements ProcessorInterface
     protected function authorizeEntity(object $model, ApiUser $user): void {}
 
     /**
-     * Throttle a caller-supplied key. Reads the limit from
-     * `system/rate_limit/{configKey}`; 0 disables the limit. Throws
-     * TooManyRequestsHttpException when the cap is hit.
+     * Decode a JSON request body into an array.
+     *
+     * Returns an empty array when there is no request or no body, and throws
+     * a 400 when the body is present but not valid JSON. Single decode path for
+     * every processor that reads a raw REST payload.
+     *
+     * @return array<mixed>
      */
-    protected function checkRateLimit(string $key, string $configKey, int $windowSeconds): void
+    protected function parseRequestBody(?Request $request): array
     {
-        $limit = (int) \Mage::getStoreConfig('system/rate_limit/' . $configKey);
-        if ($limit <= 0) {
-            return;
+        if (!$request instanceof Request) {
+            return [];
         }
 
-        if (\Mage::helper('core')->isRateLimitExceeded(false, true, $key, $limit, $windowSeconds)) {
-            throw new \Symfony\Component\HttpKernel\Exception\TooManyRequestsHttpException(
-                (string) $windowSeconds,
-                'Too many requests. Please try again later.',
-            );
+        $content = $request->getContent();
+        if ($content === '') {
+            return [];
         }
+
+        try {
+            $body = \Mage::helper('core')->jsonDecode($content);
+        } catch (\JsonException) {
+            throw new BadRequestHttpException('Invalid JSON in request body');
+        }
+
+        return is_array($body) ? $body : [];
     }
 
     /**
-     * Throttle by client IP, using Maho's proxy-aware lookup. Fails open
-     * (skips the check) if the IP can't be determined, matches the behaviour
-     * of `Mage::helper('core')->isRateLimitExceeded()` in IP mode and avoids
-     * collapsing every unknown-IP client into a shared bucket.
+     * Bridge a raw REST body into $context['args']['input'] so handlers that
+     * read GraphQL-style args work over REST too. GraphQL invocations already
+     * populate args natively, so an existing non-empty input is left untouched.
+     *
+     * @param array<string, mixed> $context
      */
-    protected function checkRateLimitByIp(string $keyPrefix, string $configKey, int $windowSeconds): void
+    protected function normalizeGraphQlInput(array &$context): void
     {
-        $ip = \Mage::helper('core/http')->getRemoteAddr();
-        if (!$ip) {
+        if (!empty($context['args']['input'])) {
             return;
         }
 
-        $this->checkRateLimit($keyPrefix . ':ip:' . $ip, $configKey, $windowSeconds);
+        $context['args']['input'] = $this->parseRequestBody($context['request'] ?? null);
     }
-
 }

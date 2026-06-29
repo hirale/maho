@@ -17,7 +17,7 @@ use Symfony\Component\HttpKernel\Event\ResponseEvent;
 use Symfony\Component\HttpKernel\KernelEvents;
 
 /**
- * HTTP Cache Listener - Adds ETag, Cache-Control, and 304 Not Modified support
+ * HTTP Cache Listener - Adds ETag, Cache-Control, and 304 Not Modified support.
  *
  * Cache tiers:
  * - Public endpoints (unauthenticated GET): Cache-Control: public, max-age=3600
@@ -93,8 +93,21 @@ class HttpCacheListener
         $path = $request->getPathInfo();
 
         if (!$isAuthenticated && $this->isPublicPath($path)) {
-            // Public endpoints: CDN-cacheable
-            $response->headers->set('Cache-Control', 'public, max-age=3600');
+            if ($request->query->has('store')) {
+                // Store selected via the `store` query parameter. These public
+                // endpoints (categories, store-config, countries) are
+                // store-specific, but a shared/CDN cache keyed on URL + Vary
+                // cannot distinguish stores here: Vary cannot express a query
+                // parameter and many CDNs strip/normalize the query string, so a
+                // `public` response could be served to a client targeting a
+                // different store (cross-store cache poisoning). Keep it private.
+                // Clients that want CDN-cacheable responses must select the store
+                // via the X-Store-Code header, which Vary covers.
+                $response->headers->set('Cache-Control', 'private, max-age=3600');
+            } else {
+                // Public endpoints: CDN-cacheable
+                $response->headers->set('Cache-Control', 'public, max-age=3600');
+            }
         } elseif ($isAuthenticated) {
             // Authenticated reads (collections and single resources): moderate
             // cache. Tag invalidation bounds staleness on writes regardless of
@@ -111,11 +124,6 @@ class HttpCacheListener
 
     private function isPublicPath(string $path): bool
     {
-        foreach (self::PUBLIC_PATHS as $publicPath) {
-            if (str_starts_with($path, $publicPath)) {
-                return true;
-            }
-        }
-        return false;
+        return array_any(self::PUBLIC_PATHS, fn($publicPath) => str_starts_with($path, $publicPath));
     }
 }

@@ -34,18 +34,18 @@ use Mage\Customer\Api\Address;
     operations: [
         new Get(
             uriTemplate: '/orders/{id}',
-            security: "is_granted('ROLE_USER') or is_granted('ROLE_ADMIN') or is_granted('ROLE_API_USER')",
+            security: "is_granted('ROLE_CUSTOMER') or is_granted('ROLE_ADMIN') or is_granted('orders/read')",
             description: 'Get an order by ID',
         ),
         new GetCollection(
             uriTemplate: '/orders',
-            security: "is_granted('ROLE_ADMIN') or is_granted('ROLE_API_USER')",
+            security: "is_granted('ROLE_ADMIN') or is_granted('orders/read')",
             description: 'Get order collection (admin only)',
         ),
         new GetCollection(
             uriTemplate: '/customers/me/orders',
             name: 'my_orders',
-            security: "is_granted('ROLE_USER') or is_granted('ROLE_API_USER')",
+            security: "is_granted('ROLE_CUSTOMER') or is_granted('ROLE_ADMIN') or is_granted('orders/read')",
             description: 'Get current customer order history',
         ),
         new Post(
@@ -66,6 +66,50 @@ use Mage\Customer\Api\Address;
             requirements: ['maskedQuoteId' => '[a-f0-9]{32}'],
             security: 'true',
             description: 'Place order from guest cart',
+        ),
+        new Post(
+            // Authenticated counterpart to place_guest_order: place an order from
+            // the customer's own numeric cart. OrderProcessor::placeOrder() recovers
+            // the cart id from the path and verifyCartOwnership() enforces that the
+            // authenticated customer (or a privileged service/admin token) owns it,
+            // so this can't be used to check out an arbitrary enumerable cart id.
+            uriTemplate: '/carts/{id}/place-order',
+            name: 'place_customer_order',
+            requirements: ['id' => '\d+'],
+            security: "is_granted('ROLE_CUSTOMER') or is_granted('ROLE_ADMIN') or is_granted('orders/create')",
+            description: 'Place order from the authenticated customer cart',
+        ),
+        // Order lifecycle actions. hold/unhold and comments are management
+        // operations (admin or orders/write grant); cancel additionally lets a
+        // customer cancel their own order, matching the cancelOrder GraphQL
+        // mutation. All return the updated Order (statusHistory reflects the change).
+        new Post(
+            uriTemplate: '/orders/{id}/hold',
+            name: 'order_hold',
+            requirements: ['id' => '\d+'],
+            security: "is_granted('ROLE_ADMIN') or is_granted('orders/write')",
+            description: 'Put an order on hold',
+        ),
+        new Post(
+            uriTemplate: '/orders/{id}/unhold',
+            name: 'order_unhold',
+            requirements: ['id' => '\d+'],
+            security: "is_granted('ROLE_ADMIN') or is_granted('orders/write')",
+            description: 'Release an order from hold',
+        ),
+        new Post(
+            uriTemplate: '/orders/{id}/cancel',
+            name: 'order_cancel',
+            requirements: ['id' => '\d+'],
+            security: "is_granted('ROLE_CUSTOMER') or is_granted('ROLE_ADMIN') or is_granted('orders/write')",
+            description: 'Cancel an order',
+        ),
+        new Post(
+            uriTemplate: '/orders/{id}/comments',
+            name: 'order_add_comment',
+            requirements: ['id' => '\d+'],
+            security: "is_granted('ROLE_ADMIN') or is_granted('orders/write')",
+            description: 'Add a status-history comment to an order',
         ),
         new Get(
             // Read an order by its human-readable increment id, authenticated
@@ -92,20 +136,21 @@ use Mage\Customer\Api\Address;
         new Query(
             name: 'item_query',
             description: 'Get an order by ID',
-            security: "is_granted('ROLE_USER') or is_granted('ROLE_API_USER')",
+            security: "is_granted('ROLE_CUSTOMER') or is_granted('ROLE_ADMIN') or is_granted('orders/read')",
         ),
         new QueryCollection(
             name: 'collection_query',
             description: 'Get orders',
-            security: "is_granted('ROLE_ADMIN') or is_granted('ROLE_API_USER')",
+            security: "is_granted('ROLE_ADMIN') or is_granted('orders/read')",
         ),
         new Query(
             name: 'order',
             args: ['id' => ['type' => 'ID!']],
             description: 'Get order by ID',
-            security: "is_granted('ROLE_USER') or is_granted('ROLE_API_USER')",
+            security: "is_granted('ROLE_CUSTOMER') or is_granted('ROLE_ADMIN') or is_granted('orders/read')",
         ),
         new Query(
+            security: 'true',
             name: 'guestOrder',
             args: ['incrementId' => ['type' => 'String!'], 'accessToken' => ['type' => 'String!']],
             description: 'Get guest order by increment ID and access token',
@@ -115,9 +160,10 @@ use Mage\Customer\Api\Address;
             name: 'customerOrders',
             args: ['page' => ['type' => 'Int'], 'pageSize' => ['type' => 'Int'], 'status' => ['type' => 'String']],
             description: 'Get orders for authenticated customer',
-            security: "is_granted('ROLE_USER') or is_granted('ROLE_API_USER')",
+            security: "is_granted('ROLE_CUSTOMER') or is_granted('ROLE_ADMIN') or is_granted('orders/read')",
         ),
         new Mutation(
+            security: 'true',
             name: 'placeOrder',
             args: [
                 'cartId' => ['type' => 'ID'],
@@ -137,7 +183,42 @@ use Mage\Customer\Api\Address;
                 'reason' => ['type' => 'String', 'description' => 'Optional cancellation reason'],
             ],
             description: 'Cancel an order',
-            security: "is_granted('ROLE_USER') or is_granted('ROLE_API_USER')",
+            security: "is_granted('ROLE_CUSTOMER') or is_granted('orders/write')",
+        ),
+        // Names omit the "Order" noun: ApiPlatform appends the resource shortName,
+        // so these surface as holdOrder / unholdOrder / addCommentOrder rather than
+        // a stuttering holdOrderOrder.
+        new Mutation(
+            name: 'hold',
+            args: [
+                'orderId' => ['type' => 'ID'],
+                'incrementId' => ['type' => 'String'],
+                'reason' => ['type' => 'String', 'description' => 'Optional reason'],
+            ],
+            description: 'Put an order on hold',
+            security: "is_granted('ROLE_ADMIN') or is_granted('orders/write')",
+        ),
+        new Mutation(
+            name: 'unhold',
+            args: [
+                'orderId' => ['type' => 'ID'],
+                'incrementId' => ['type' => 'String'],
+                'reason' => ['type' => 'String', 'description' => 'Optional reason'],
+            ],
+            description: 'Release an order from hold',
+            security: "is_granted('ROLE_ADMIN') or is_granted('orders/write')",
+        ),
+        new Mutation(
+            name: 'addComment',
+            args: [
+                'orderId' => ['type' => 'ID'],
+                'incrementId' => ['type' => 'String'],
+                'comment' => ['type' => 'String!'],
+                'notifyCustomer' => ['type' => 'Boolean'],
+                'visibleOnFront' => ['type' => 'Boolean'],
+            ],
+            description: 'Add a status-history comment to an order',
+            security: "is_granted('ROLE_ADMIN') or is_granted('orders/write')",
         ),
     ],
 )]

@@ -22,7 +22,7 @@ use Symfony\Component\HttpKernel\Exception\HttpException;
 use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 
 /**
- * Customer State Processor - Handles customer mutations for API Platform
+ * Customer State Processor - Handles customer mutations for API Platform.
  */
 final class CustomerProcessor extends \Maho\ApiPlatform\Processor
 {
@@ -58,6 +58,12 @@ final class CustomerProcessor extends \Maho\ApiPlatform\Processor
     public function process(mixed $data, Operation $operation, array $uriVariables = [], array $context = []): Customer
     {
         $operationName = $operation->getName();
+
+        // Bridge REST request body into context args (GraphQL populates args natively).
+        // The forgot/reset/create-from-order handlers read from $context['args']['input'];
+        // for REST callers API Platform does not populate that key, so the JSON body is
+        // injected here to keep those endpoints working over REST.
+        $this->normalizeGraphQlInput($context);
 
         // Handle REST PUT /customers/me (update profile)
         if ($operationName === 'update_profile') {
@@ -228,7 +234,7 @@ final class CustomerProcessor extends \Maho\ApiPlatform\Processor
                 $address->setStreet(['']);
                 $address->setCity('');
                 $address->setPostcode('');
-                $address->setCountryId('AU');
+                $address->setCountryId(\Mage::getStoreConfig('general/country/default', $storeId) ?: 'US');
                 $address->setIsDefaultBilling(true);
                 $address->setIsDefaultShipping(true);
                 $address->save();
@@ -254,6 +260,10 @@ final class CustomerProcessor extends \Maho\ApiPlatform\Processor
             throw new BadRequestHttpException('Email and password are required');
         }
 
+        // Per-IP cap first (matches the REST /auth/token endpoint), so an
+        // attacker rotating email addresses can't spray the login mutation
+        // beyond the IP allowance; then the tighter per-email cap.
+        $this->checkRateLimitByIp('graphql_login', 'auth_token_ip', 60);
         $this->checkRateLimit('graphql_login:email:' . strtolower($email), 'customer_login', 60);
 
         StoreContext::ensureStore();
@@ -266,6 +276,12 @@ final class CustomerProcessor extends \Maho\ApiPlatform\Processor
         try {
             $customer->authenticate($email, $password);
         } catch (\Mage_Core_Exception $e) {
+            // Surface unconfirmed-email distinctly (matches the REST /auth/token
+            // path) so the customer knows to confirm rather than seeing a
+            // misleading "wrong password" error.
+            if ($e->getCode() === \Mage_Customer_Model_Customer::EXCEPTION_EMAIL_NOT_CONFIRMED) {
+                throw new HttpException(403, 'This account is not confirmed. Please check your email for the confirmation link.');
+            }
             throw new BadRequestHttpException('Invalid email or password');
         }
 
@@ -290,8 +306,8 @@ final class CustomerProcessor extends \Maho\ApiPlatform\Processor
         $args = $context['args']['input'] ?? [];
 
         return $this->doUpdateProfile(
-            firstName: $args['firstname'] ?? null,
-            lastName: $args['lastname'] ?? null,
+            firstName: $args['firstName'] ?? null,
+            lastName: $args['lastName'] ?? null,
             email: $args['email'] ?? null,
         );
     }
@@ -456,9 +472,7 @@ final class CustomerProcessor extends \Maho\ApiPlatform\Processor
      */
     private function createAccountFromOrder(array $context): Customer
     {
-        $request = $context['request'] ?? null;
-        $body = $request ? (json_decode($request->getContent(), true) ?? []) : [];
-        $args = $context['args']['input'] ?? $body;
+        $args = $context['args']['input'] ?? [];
 
         $accountToken = $args['accountToken'] ?? '';
         $password = $args['password'] ?? '';
@@ -499,14 +513,15 @@ final class CustomerProcessor extends \Maho\ApiPlatform\Processor
             throw new HttpException(409, 'An account with this email already exists. Please log in.');
         }
 
-        $billingAddress = $order->getBillingAddress();
+        // Virtual/incomplete orders may have no billing address (getBillingAddress() returns false)
+        $billingAddress = $order->getBillingAddress() ?: null;
 
         $customer = \Mage::getModel('customer/customer');
         $customer->setWebsiteId($websiteId);
         $customer->setStoreId($order->getStoreId());
         $customer->setEmail($email);
-        $customer->setFirstname($billingAddress->getFirstname());
-        $customer->setLastname($billingAddress->getLastname());
+        $customer->setFirstname($billingAddress ? $billingAddress->getFirstname() : '');
+        $customer->setLastname($billingAddress ? $billingAddress->getLastname() : '');
         $customer->setPassword($password);
         $customer->save();
 

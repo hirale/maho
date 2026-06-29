@@ -29,19 +29,19 @@ use Maho\ApiPlatform\CrudResource;
     operations: [
         new Get(
             uriTemplate: '/credit-memos/{id}',
-            security: "is_granted('ROLE_ADMIN') or is_granted('ROLE_API_USER')",
+            security: "is_granted('ROLE_ADMIN') or is_granted('credit-memos/read')",
             description: 'Get a credit memo by ID',
         ),
         new GetCollection(
             uriTemplate: '/orders/{orderId}/credit-memos',
             uriVariables: ['orderId' => new Link(toProperty: 'orderId')],
-            security: "is_granted('ROLE_ADMIN') or is_granted('ROLE_API_USER')",
+            security: "is_granted('ROLE_ADMIN') or is_granted('credit-memos/read')",
             description: 'Get credit memos for an order',
         ),
         new Post(
             uriTemplate: '/orders/{orderId}/credit-memos',
             uriVariables: ['orderId' => new Link(toProperty: 'orderId')],
-            security: "is_granted('ROLE_ADMIN') or is_granted('ROLE_API_USER')",
+            security: "is_granted('ROLE_ADMIN') or is_granted('credit-memos/create')",
             description: 'Create a credit memo / refund for an order',
         ),
     ],
@@ -49,18 +49,18 @@ use Maho\ApiPlatform\CrudResource;
         new Query(
             name: 'item_query',
             description: 'Get a credit memo by ID',
-            security: "is_granted('ROLE_ADMIN') or is_granted('ROLE_API_USER')",
+            security: "is_granted('ROLE_ADMIN') or is_granted('credit-memos/read')",
         ),
         new QueryCollection(
             name: 'collection_query',
             description: 'Get all credit memos',
-            security: "is_granted('ROLE_ADMIN') or is_granted('ROLE_API_USER')",
+            security: "is_granted('ROLE_ADMIN') or is_granted('credit-memos/read')",
         ),
         new QueryCollection(
             name: 'orderCreditMemos',
             description: 'Get credit memos for a specific order',
             args: ['orderId' => ['type' => 'Int!']],
-            security: "is_granted('ROLE_ADMIN') or is_granted('ROLE_API_USER')",
+            security: "is_granted('ROLE_ADMIN') or is_granted('credit-memos/read')",
         ),
         new Mutation(
             name: 'createCreditMemo',
@@ -73,7 +73,7 @@ use Maho\ApiPlatform\CrudResource;
                 'adjustmentNegative' => ['type' => 'Float'],
                 'offlineRefund' => ['type' => 'Boolean'],
             ],
-            security: "is_granted('ROLE_ADMIN') or is_granted('ROLE_API_USER')",
+            security: "is_granted('credit-memos/create')",
         ),
     ],
 )]
@@ -98,6 +98,9 @@ class CreditMemo extends CrudResource
 
     #[ApiProperty(writable: false, extraProperties: ['computed' => true])]
     public ?string $state = null;
+
+    #[ApiProperty(description: 'Currency code for all amount fields', writable: false, extraProperties: ['computed' => true])]
+    public string $currency = '';
 
     #[ApiProperty(writable: false)]
     public float $grandTotal = 0;
@@ -141,6 +144,8 @@ class CreditMemo extends CrudResource
             \Mage_Sales_Model_Order_Creditmemo::STATE_CANCELED => 'canceled',
         ];
         $dto->state = $stateMap[(int) $model->getState()] ?? 'unknown';
+
+        $dto->currency = $model->getOrderCurrencyCode() ?: \Mage::app()->getStore()->getCurrentCurrencyCode();
 
         $order = $model->getOrder();
         $dto->orderIncrementId = $order ? $order->getIncrementId() : null;

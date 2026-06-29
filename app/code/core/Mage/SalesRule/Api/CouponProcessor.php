@@ -16,7 +16,7 @@ use Symfony\Component\HttpKernel\Exception\BadRequestHttpException;
 use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 
 /**
- * Coupon State Processor - Handles coupon CRUD and validation
+ * Coupon State Processor - Handles coupon CRUD and validation.
  */
 final class CouponProcessor extends \Maho\ApiPlatform\Processor
 {
@@ -91,6 +91,9 @@ final class CouponProcessor extends \Maho\ApiPlatform\Processor
 
     private function doCreate(array $data): Coupon
     {
+        $this->requireAdminOrApiUser('Coupon creation requires admin or API access');
+        $this->requireApiPermission('coupons/create');
+
         $code = $data['code'] ?? '';
         $this->validateCouponCode($code);
 
@@ -156,6 +159,7 @@ final class CouponProcessor extends \Maho\ApiPlatform\Processor
     private function doUpdate(int $id, array $data): Coupon
     {
         $this->requireAdminOrApiUser('Coupon update requires admin or API access');
+        $this->requireApiPermission('coupons/write');
 
         /** @var \Mage_SalesRule_Model_Coupon $coupon */
         $coupon = \Mage::getModel('salesrule/coupon');
@@ -239,6 +243,7 @@ final class CouponProcessor extends \Maho\ApiPlatform\Processor
     private function doDelete(int $id): null
     {
         $this->requireAdminOrApiUser('Coupon deletion requires admin or API access');
+        $this->requireApiPermission('coupons/delete');
 
         if (!$id) {
             throw new BadRequestHttpException('Coupon ID is required');
@@ -270,6 +275,18 @@ final class CouponProcessor extends \Maho\ApiPlatform\Processor
         if (empty($code)) {
             throw new BadRequestHttpException('Coupon code is required');
         }
+
+        // Public endpoint, throttle by IP to stop bulk enumeration of
+        // auto-generated coupon batches.
+        $this->checkRateLimitByIp('coupon_validate', 'coupon_validate', 60);
+
+        // Anonymous callers get a yes/no answer only, the concrete discount
+        // type/amount would let an unauthenticated client harvest the value of
+        // every code before redeeming it. Customers/admins/API users still see
+        // the full result (they need it to preview a discount at checkout).
+        $isAnonymous = !$this->isAdmin()
+            && !$this->isApiUser()
+            && $this->getAuthenticatedCustomerId() === null;
 
         $dto = new Coupon();
         $dto->id = 0;
@@ -338,6 +355,12 @@ final class CouponProcessor extends \Maho\ApiPlatform\Processor
 
         $dto->isValid = true;
         $dto->validationMessage = 'Coupon is valid';
+
+        // Don't disclose rule identity or discount value to anonymous callers.
+        if ($isAnonymous) {
+            return $dto;
+        }
+
         $dto->id = (int) $coupon->getId();
         $dto->ruleId = (int) $coupon->getRuleId();
 

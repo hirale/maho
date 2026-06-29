@@ -54,9 +54,10 @@ final class NewsletterProcessor extends \Maho\ApiPlatform\Processor
                 throw new BadRequestHttpException('Customer not found');
             }
 
-            if (empty($email)) {
-                $email = $customer->getEmail();
-            }
+            // An authenticated customer may only subscribe their own address.
+            // Ignore any client-supplied email to prevent subscribing (and
+            // emailing) arbitrary third-party addresses under this customer_id.
+            $email = $customer->getEmail();
 
             $data->customerId = $customerId;
         }
@@ -74,6 +75,10 @@ final class NewsletterProcessor extends \Maho\ApiPlatform\Processor
             throw new BadRequestHttpException('Invalid email address');
         }
 
+        // IP-level cap first: the per-email bucket alone is trivially bypassed
+        // by submitting many distinct addresses from one client, turning the
+        // endpoint into an uncapped confirmation-email relay. Mirrors unsubscribe().
+        $this->checkRateLimitByIp('newsletter_subscribe', 'newsletter_subscribe', 3600);
         $this->checkRateLimit('newsletter_subscribe:email:' . strtolower($email), 'newsletter_subscribe', 3600);
 
         if ($customerId === null) {
@@ -90,18 +95,38 @@ final class NewsletterProcessor extends \Maho\ApiPlatform\Processor
             $subscriber = \Mage::getModel('newsletter/subscriber');
 
             $subscriber->loadByEmail($email);
-            if ($subscriber->getId() && $subscriber->getSubscriberStatus() == \Mage_Newsletter_Model_Subscriber::STATUS_SUBSCRIBED) {
+            $alreadySubscribed = $subscriber->getId()
+                && $subscriber->getSubscriberStatus() == \Mage_Newsletter_Model_Subscriber::STATUS_SUBSCRIBED;
+
+            $confirmRequired = \Mage::getStoreConfigFlag(\Mage_Newsletter_Model_Subscriber::XML_PATH_CONFIRMATION_FLAG);
+
+            // Guests get a uniform response regardless of prior state. Echoing
+            // "already subscribed" (or the subscriber's customer_id) would let an
+            // unauthenticated caller probe whether an address is a registered
+            // customer.
+            if ($customerId === null) {
+                if (!$alreadySubscribed) {
+                    $subscriber->subscribe($email);
+                }
+                $dto = new NewsletterSubscription();
+                $dto->email = $email;
+                $dto->message = $confirmRequired
+                    ? 'A confirmation email has been sent. Please check your inbox.'
+                    : 'You have been successfully subscribed to the newsletter.';
+                return $dto;
+            }
+
+            if ($alreadySubscribed) {
                 $dto = NewsletterSubscription::fromModel($subscriber);
                 $dto->message = 'You are already subscribed to the newsletter.';
                 return $dto;
             }
 
-            $status = $subscriber->subscribe($email);
+            $subscriber->subscribe($email);
 
             $subscriber->loadByEmail($email);
             $dto = NewsletterSubscription::fromModel($subscriber);
 
-            $confirmRequired = \Mage::getStoreConfigFlag(\Mage_Newsletter_Model_Subscriber::XML_PATH_CONFIRMATION_FLAG);
             $dto->confirmationRequired = $confirmRequired && !$dto->isSubscribed;
 
             if ($dto->confirmationRequired) {

@@ -27,7 +27,6 @@ use Mage\Customer\Api\Address;
     mahoSection: 'Customers',
     mahoOperations: ['read' => 'View', 'write' => 'Create & Modify'],
     mahoCustomerScoped: true,
-    mahoRestSegments: ['guest-carts'],
     shortName: 'Cart',
     description: 'View cart, add/remove items, apply coupons, set shipping & payment',
     provider: CartProvider::class,
@@ -35,34 +34,136 @@ use Mage\Customer\Api\Address;
     operations: [
         new Get(
             uriTemplate: '/carts/{id}',
-            security: "is_granted('ROLE_USER') or is_granted('ROLE_ADMIN') or is_granted('ROLE_API_USER')",
+            security: "is_granted('ROLE_CUSTOMER') or is_granted('ROLE_ADMIN') or is_granted('carts/read')",
             description: 'Get a cart by numeric ID. CartProvider enforces per-customer ownership via verifyCartAccess(); guest masked-ID lookups go through /guest-carts/{id}.',
         ),
         new Post(
             uriTemplate: '/carts',
             name: 'create_authenticated_cart',
-            security: "is_granted('ROLE_USER') or is_granted('ROLE_ADMIN') or is_granted('ROLE_API_USER')",
+            security: "is_granted('ROLE_CUSTOMER') or is_granted('ROLE_ADMIN') or is_granted('carts/write')",
             description: 'Create a new cart for the authenticated customer',
         ),
         new Post(
             uriTemplate: '/carts/{id}/items',
             name: 'add_cart_item',
-            security: "is_granted('ROLE_USER') or is_granted('ROLE_ADMIN') or is_granted('ROLE_API_USER')",
+            security: "is_granted('ROLE_CUSTOMER') or is_granted('ROLE_ADMIN') or is_granted('carts/write')",
             description: 'Add item to cart by numeric ID',
         ),
         new Put(
             uriTemplate: '/carts/{id}/items/{itemId}',
             name: 'update_cart_item',
             output: false,
-            security: "is_granted('ROLE_USER') or is_granted('ROLE_ADMIN') or is_granted('ROLE_API_USER')",
+            security: "is_granted('ROLE_CUSTOMER') or is_granted('ROLE_ADMIN') or is_granted('carts/write')",
             description: 'Update item quantity in cart',
         ),
         new Delete(
             uriTemplate: '/carts/{id}/items/{itemId}',
             name: 'remove_cart_item',
             output: false,
-            security: "is_granted('ROLE_USER') or is_granted('ROLE_ADMIN') or is_granted('ROLE_API_USER')",
+            security: "is_granted('ROLE_CUSTOMER') or is_granted('ROLE_ADMIN') or is_granted('carts/write')",
             description: 'Remove item from cart',
+        ),
+        // Authenticated-cart checkout sub-resources. These mirror the guest-cart
+        // endpoints onto the numeric /carts/{id} path so a logged-in customer can
+        // run the full checkout flow over REST (not only GraphQL). CartProvider /
+        // CartProcessor resolve the cart generically via resolveCartFromRequest()
+        // and verifyCartAccess() enforces per-customer ownership.
+        new Post(
+            uriTemplate: '/carts/{id}/coupon',
+            name: 'apply_my_coupon',
+            security: "is_granted('ROLE_CUSTOMER') or is_granted('ROLE_ADMIN') or is_granted('carts/write')",
+            description: 'Apply coupon to cart',
+        ),
+        new Delete(
+            uriTemplate: '/carts/{id}/coupon',
+            name: 'remove_my_coupon',
+            security: "is_granted('ROLE_CUSTOMER') or is_granted('ROLE_ADMIN') or is_granted('carts/write')",
+            description: 'Remove coupon from cart',
+        ),
+        new Post(
+            uriTemplate: '/carts/{id}/giftcards',
+            name: 'apply_my_giftcard',
+            security: "is_granted('ROLE_CUSTOMER') or is_granted('ROLE_ADMIN') or is_granted('carts/write')",
+            description: 'Apply gift card to cart',
+        ),
+        new Delete(
+            uriTemplate: '/carts/{id}/giftcards/{code}',
+            name: 'remove_my_giftcard',
+            security: "is_granted('ROLE_CUSTOMER') or is_granted('ROLE_ADMIN') or is_granted('carts/write')",
+            description: 'Remove gift card from cart',
+        ),
+        new Get(
+            uriTemplate: '/carts/{id}/totals',
+            name: 'get_my_totals',
+            security: "is_granted('ROLE_CUSTOMER') or is_granted('ROLE_ADMIN') or is_granted('carts/read')",
+            description: 'Get cart totals',
+        ),
+        new Post(
+            uriTemplate: '/carts/{id}/shipping-methods',
+            name: 'get_my_shipping',
+            security: "is_granted('ROLE_CUSTOMER') or is_granted('ROLE_ADMIN') or is_granted('carts/write')",
+            description: 'Get available shipping methods for cart',
+        ),
+        new Get(
+            uriTemplate: '/carts/{id}/payment-methods',
+            name: 'get_my_payments',
+            security: "is_granted('ROLE_CUSTOMER') or is_granted('ROLE_ADMIN') or is_granted('carts/read')",
+            description: 'Get available payment methods for cart',
+        ),
+        // Gift messages — cart-level and per-item, for both authenticated and
+        // guest carts. PUT sets/updates (body: {sender, recipient, message});
+        // DELETE clears. CartProcessor reuses CartService::setGiftMessage().
+        new Put(
+            uriTemplate: '/carts/{id}/gift-message',
+            name: 'set_my_cart_gift_message',
+            security: "is_granted('ROLE_CUSTOMER') or is_granted('ROLE_ADMIN') or is_granted('carts/write')",
+            description: 'Set the gift message on the cart',
+        ),
+        new Delete(
+            uriTemplate: '/carts/{id}/gift-message',
+            name: 'remove_my_cart_gift_message',
+            security: "is_granted('ROLE_CUSTOMER') or is_granted('ROLE_ADMIN') or is_granted('carts/write')",
+            description: 'Remove the gift message from the cart',
+        ),
+        new Put(
+            uriTemplate: '/carts/{id}/items/{itemId}/gift-message',
+            name: 'set_my_item_gift_message',
+            security: "is_granted('ROLE_CUSTOMER') or is_granted('ROLE_ADMIN') or is_granted('carts/write')",
+            description: 'Set the gift message on a cart item',
+        ),
+        new Delete(
+            uriTemplate: '/carts/{id}/items/{itemId}/gift-message',
+            name: 'remove_my_item_gift_message',
+            security: "is_granted('ROLE_CUSTOMER') or is_granted('ROLE_ADMIN') or is_granted('carts/write')",
+            description: 'Remove the gift message from a cart item',
+        ),
+        new Put(
+            uriTemplate: '/guest-carts/{id}/gift-message',
+            name: 'set_guest_cart_gift_message',
+            uriVariables: ['id' => new Link(fromClass: Cart::class, identifiers: [])],
+            security: 'true',
+            description: 'Set the gift message on a guest cart',
+        ),
+        new Delete(
+            uriTemplate: '/guest-carts/{id}/gift-message',
+            name: 'remove_guest_cart_gift_message',
+            uriVariables: ['id' => new Link(fromClass: Cart::class, identifiers: [])],
+            security: 'true',
+            description: 'Remove the gift message from a guest cart',
+        ),
+        new Put(
+            uriTemplate: '/guest-carts/{id}/items/{itemId}/gift-message',
+            name: 'set_guest_item_gift_message',
+            uriVariables: ['id' => new Link(fromClass: Cart::class, identifiers: [])],
+            security: 'true',
+            description: 'Set the gift message on a guest cart item',
+        ),
+        new Delete(
+            uriTemplate: '/guest-carts/{id}/items/{itemId}/gift-message',
+            name: 'remove_guest_item_gift_message',
+            uriVariables: ['id' => new Link(fromClass: Cart::class, identifiers: [])],
+            security: 'true',
+            description: 'Remove the gift message from a guest cart item',
         ),
         new Post(
             uriTemplate: '/guest-carts',
@@ -152,14 +253,17 @@ use Mage\Customer\Api\Address;
     ],
     graphQlOperations: [
         new Query(
+            security: 'true',
             name: 'item_query',
             description: 'Get a cart by ID',
         ),
         new QueryCollection(
+            security: 'true',
             name: 'collection_query',
             description: 'Get carts',
         ),
         new Query(
+            security: 'true',
             name: 'getCartByMaskedId',
             args: ['maskedId' => ['type' => 'String!']],
             description: 'Get cart by masked ID',
@@ -169,22 +273,23 @@ use Mage\Customer\Api\Address;
             name: 'customerCart',
             args: [],
             description: 'Get current customer active cart',
-            security: "is_granted('ROLE_USER') or is_granted('ROLE_API_USER')",
+            security: "is_granted('ROLE_CUSTOMER') or is_granted('ROLE_ADMIN') or is_granted('carts/read')",
             resolver: CustomQueryResolver::class,
         ),
         new Mutation(
+            security: 'true',
             name: 'createCart',
             args: ['storeId' => ['type' => 'Int', 'description' => 'Optional store ID, defaults to current store']],
             description: 'Create an empty cart',
         ),
         new Mutation(
+            security: 'true',
             name: 'addToCart',
             args: [
                 'cartId' => ['type' => 'ID'],
                 'maskedId' => ['type' => 'String'],
                 'sku' => ['type' => 'String!'],
                 'qty' => ['type' => 'Float!'],
-                'fulfillmentType' => ['type' => 'String', 'description' => 'SHIP (default) or PICKUP'],
                 'options' => ['type' => 'Iterable', 'description' => 'Custom options as {optionId: valueId} pairs'],
                 'links' => ['type' => '[Int]', 'description' => 'Downloadable link IDs to purchase'],
                 'superGroup' => ['type' => 'Iterable', 'description' => 'Grouped product qty map: {childProductId: qty}'],
@@ -194,36 +299,31 @@ use Mage\Customer\Api\Address;
             description: 'Add item to cart',
         ),
         new Mutation(
+            security: 'true',
             name: 'updateCartItemQty',
             args: ['cartId' => ['type' => 'ID'], 'maskedId' => ['type' => 'String'], 'itemId' => ['type' => 'ID!'], 'qty' => ['type' => 'Float!']],
             description: 'Update cart item quantity',
         ),
         new Mutation(
-            name: 'setCartItemFulfillment',
-            args: [
-                'cartId' => ['type' => 'ID'],
-                'maskedId' => ['type' => 'String'],
-                'itemId' => ['type' => 'ID!'],
-                'fulfillmentType' => ['type' => 'String!', 'description' => 'SHIP or PICKUP'],
-            ],
-            description: 'Set fulfillment type for a cart item (SHIP or PICKUP for BOPIS)',
-        ),
-        new Mutation(
+            security: 'true',
             name: 'removeCartItem',
             args: ['cartId' => ['type' => 'ID'], 'maskedId' => ['type' => 'String'], 'itemId' => ['type' => 'ID!']],
             description: 'Remove item from cart',
         ),
         new Mutation(
+            security: 'true',
             name: 'applyCouponToCart',
             args: ['cartId' => ['type' => 'ID'], 'maskedId' => ['type' => 'String'], 'couponCode' => ['type' => 'String!']],
             description: 'Apply coupon code to cart',
         ),
         new Mutation(
+            security: 'true',
             name: 'removeCouponFromCart',
             args: ['cartId' => ['type' => 'ID'], 'maskedId' => ['type' => 'String']],
             description: 'Remove coupon code from cart',
         ),
         new Mutation(
+            security: 'true',
             name: 'setShippingAddressOnCart',
             args: [
                 'cartId' => ['type' => 'ID'],
@@ -242,6 +342,7 @@ use Mage\Customer\Api\Address;
             description: 'Set shipping address on cart',
         ),
         new Mutation(
+            security: 'true',
             name: 'setBillingAddressOnCart',
             args: [
                 'cartId' => ['type' => 'ID'],
@@ -261,6 +362,7 @@ use Mage\Customer\Api\Address;
             description: 'Set billing address on cart',
         ),
         new Mutation(
+            security: 'true',
             name: 'setShippingMethodOnCart',
             args: [
                 'cartId' => ['type' => 'ID'],
@@ -271,6 +373,7 @@ use Mage\Customer\Api\Address;
             description: 'Set shipping method on cart',
         ),
         new Mutation(
+            security: 'true',
             name: 'setPaymentMethodOnCart',
             args: [
                 'cartId' => ['type' => 'ID'],
@@ -283,17 +386,45 @@ use Mage\Customer\Api\Address;
             name: 'assignCustomerToCart',
             args: ['cartId' => ['type' => 'ID'], 'maskedId' => ['type' => 'String'], 'customerId' => ['type' => 'ID!']],
             description: 'Assign customer to cart',
-            security: "is_granted('ROLE_USER') or is_granted('ROLE_ADMIN') or is_granted('ROLE_API_USER')",
+            security: "is_granted('ROLE_CUSTOMER') or is_granted('carts/write')",
         ),
         new Mutation(
+            security: 'true',
             name: 'applyGiftcardToCart',
             args: ['cartId' => ['type' => 'ID'], 'maskedId' => ['type' => 'String'], 'giftcardCode' => ['type' => 'String!']],
             description: 'Apply gift card to cart',
         ),
         new Mutation(
+            security: 'true',
             name: 'removeGiftcardFromCart',
             args: ['cartId' => ['type' => 'ID'], 'maskedId' => ['type' => 'String'], 'giftcardCode' => ['type' => 'String!']],
             description: 'Remove gift card from cart',
+        ),
+        new Mutation(
+            security: 'true',
+            // Named without a leading "Cart" so ApiPlatform's auto-appended
+            // resource suffix reads as `setGiftMessageCart`, not a stuttering
+            // `setCartGiftMessageCart`.
+            name: 'setGiftMessage',
+            args: [
+                'cartId' => ['type' => 'ID'],
+                'maskedId' => ['type' => 'String'],
+                'itemId' => ['type' => 'ID', 'description' => 'Target a cart item; omit for the whole cart'],
+                'sender' => ['type' => 'String!'],
+                'recipient' => ['type' => 'String!'],
+                'message' => ['type' => 'String!'],
+            ],
+            description: 'Set the gift message on the cart or a cart item',
+        ),
+        new Mutation(
+            security: 'true',
+            name: 'removeGiftMessage',
+            args: [
+                'cartId' => ['type' => 'ID'],
+                'maskedId' => ['type' => 'String'],
+                'itemId' => ['type' => 'ID', 'description' => 'Target a cart item; omit for the whole cart'],
+            ],
+            description: 'Remove the gift message from the cart or a cart item',
         ),
     ],
 )]
@@ -367,6 +498,10 @@ class Cart extends \Maho\ApiPlatform\Resource
     /** @var array<array{code: string, balance: float, appliedAmount: float}> */
     #[ApiProperty(description: 'Applied gift cards', writable: false)]
     public array $appliedGiftcards = [];
+
+    /** @var array{sender: string, recipient: string, message: string}|null */
+    #[ApiProperty(description: 'Cart-level gift message (set via /carts/{id}/gift-message)', writable: false)]
+    public ?array $giftMessage = null;
 
     #[ApiProperty(description: 'Cart currency code', writable: false)]
     public string $currency = 'USD';

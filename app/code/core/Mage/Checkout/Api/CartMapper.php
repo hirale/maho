@@ -13,7 +13,7 @@ namespace Mage\Checkout\Api;
 use Mage\Customer\Api\Address;
 
 /**
- * Shared cart-to-DTO mapping logic used by both CartProvider and CartProcessor
+ * Shared cart-to-DTO mapping logic used by both CartProvider and CartProcessor.
  */
 class CartMapper
 {
@@ -37,6 +37,7 @@ class CartMapper
         $cart->itemsQty = (float) $quote->getItemsQty();
         $cart->createdAt = $quote->getCreatedAt();
         $cart->updatedAt = $quote->getUpdatedAt();
+        $cart->giftMessage = $this->mapGiftMessage($quote);
 
         // Batch load product thumbnails and stock status to avoid N+1 queries
         $items = $quote->getAllVisibleItems();
@@ -93,25 +94,36 @@ class CartMapper
             }
         }
 
-        // Get applied coupon
+        // Get applied coupon. Virtual/downloadable-only carts accumulate
+        // totals on the billing address, so read discounts from there.
+        $totalsAddress = $quote->isVirtual() ? $quote->getBillingAddress() : $shippingAddress;
         $couponCode = $quote->getCouponCode();
         if ($couponCode) {
             $cart->appliedCoupon = [
                 'code' => $couponCode,
-                'discountAmount' => (float) abs($shippingAddress ? $shippingAddress->getDiscountAmount() : 0),
+                'discountAmount' => (float) abs($totalsAddress ? $totalsAddress->getDiscountAmount() : 0),
             ];
         }
 
         // Get applied gift cards
         $giftcardCodesJson = $quote->getData('giftcard_codes');
         if ($giftcardCodesJson) {
-            $giftcardCodes = json_decode($giftcardCodesJson, true);
+            $giftcardCodes = \Mage::helper('core')->jsonDecode($giftcardCodesJson, true);
             if (is_array($giftcardCodes)) {
-                foreach ($giftcardCodes as $code => $balance) {
+                // giftcard_codes stores {code: applied_amount}. The live card
+                // balance must be loaded from the model. This is the single
+                // source for applied gift cards: the GraphQL cart handler maps
+                // through here too, so REST and GraphQL return identical values.
+                foreach ($giftcardCodes as $code => $appliedAmount) {
+                    /** @var \Maho_Giftcard_Model_Giftcard $giftcard */
+                    $giftcard = \Mage::getModel('giftcard/giftcard')->loadByCode((string) $code);
+                    if (!$giftcard->getId()) {
+                        continue;
+                    }
                     $cart->appliedGiftcards[] = [
                         'code' => (string) $code,
-                        'balance' => (float) $balance,
-                        'appliedAmount' => 0.0,
+                        'balance' => (float) $giftcard->getBalance(),
+                        'appliedAmount' => (float) $appliedAmount,
                     ];
                 }
             }
@@ -144,7 +156,7 @@ class CartMapper
         $dto->priceInclTax = (float) $item->getPriceInclTax();
         $dto->rowTotal = (float) $item->getRowTotal();
         $dto->rowTotalInclTax = (float) $item->getRowTotalInclTax();
-        $dto->rowTotalWithDiscount = (float) ($item->getRowTotal() - $item->getDiscountAmount());
+        $dto->rowTotalWithDiscount = max(0.0, (float) $item->getRowTotal() - (float) $item->getDiscountAmount());
         $dto->discountAmount = $item->getDiscountAmount() ? (float) $item->getDiscountAmount() : null;
         $dto->discountPercent = $item->getDiscountPercent() ? (float) $item->getDiscountPercent() : null;
         $dto->taxAmount = $item->getTaxAmount() ? (float) $item->getTaxAmount() : null;
@@ -153,13 +165,40 @@ class CartMapper
         $dto->productType = $item->getProductType();
         $dto->thumbnailUrl = $preloadedThumbnailUrl;
         $dto->stockStatus = $preloadedStockStatus;
-        $dto->fulfillmentType = $this->getItemFulfillmentType($item);
 
         // Get configured product options for display
         $dto->options = $this->getItemConfigurationOptions($item);
 
+        $dto->giftMessage = $this->mapGiftMessage($item);
+
         \Mage::dispatchEvent('api_cart_item_dto_build', ['item' => $item, 'dto' => $dto]);
         return $dto;
+    }
+
+    /**
+     * Read the gift message attached to a quote or quote item into the API
+     * shape, or null when none is set. Safe to call when the GiftMessage module
+     * is absent (returns null).
+     *
+     * @return array{sender: string, recipient: string, message: string}|null
+     */
+    private function mapGiftMessage(\Maho\DataObject $entity): ?array
+    {
+        $messageId = (int) $entity->getGiftMessageId();
+        if (!$messageId) {
+            return null;
+        }
+
+        $message = \Mage::getModel('giftmessage/message')->load($messageId);
+        if (!$message->getId()) {
+            return null;
+        }
+
+        return [
+            'sender' => (string) $message->getSender(),
+            'recipient' => (string) $message->getRecipient(),
+            'message' => (string) $message->getMessage(),
+        ];
     }
 
     /**
@@ -242,6 +281,9 @@ class CartMapper
      */
     public function mapPricesToArray(\Mage_Sales_Model_Quote $quote): array
     {
+        // Virtual/downloadable-only carts accumulate discount and tax totals on
+        // the billing address rather than the shipping address.
+        $totalsAddress = $quote->isVirtual() ? $quote->getBillingAddress() : $quote->getShippingAddress();
         $shippingAddress = $quote->getShippingAddress();
 
         $prices = [
@@ -256,17 +298,19 @@ class CartMapper
             'giftcardAmount' => null,
         ];
 
-        if ($shippingAddress) {
-            $prices['discountAmount'] = $shippingAddress->getDiscountAmount()
-                ? (float) abs($shippingAddress->getDiscountAmount())
+        if ($totalsAddress) {
+            $prices['discountAmount'] = $totalsAddress->getDiscountAmount()
+                ? (float) abs($totalsAddress->getDiscountAmount())
                 : null;
+            $prices['taxAmount'] = (float) $totalsAddress->getTaxAmount();
+        }
+        if ($shippingAddress) {
             $prices['shippingAmount'] = $shippingAddress->getShippingAmount()
                 ? (float) $shippingAddress->getShippingAmount()
                 : null;
             $prices['shippingAmountInclTax'] = $shippingAddress->getShippingInclTax()
                 ? (float) $shippingAddress->getShippingInclTax()
                 : null;
-            $prices['taxAmount'] = (float) $shippingAddress->getTaxAmount();
         }
 
         return $prices;
@@ -294,7 +338,7 @@ class CartMapper
                 ];
             }
         } catch (\Exception $e) {
-            \Mage::log('Error getting shipping methods: ' . $e->getMessage());
+            \Mage::log('Error getting shipping methods: ' . $e->getMessage(), \Mage::LOG_ERROR);
         }
 
         return $methods;
@@ -348,28 +392,12 @@ class CartMapper
                 }
             }
         } catch (\Exception $e) {
-            \Mage::log('Error getting payment methods: ' . $e->getMessage());
+            \Mage::log('Error getting payment methods: ' . $e->getMessage(), \Mage::LOG_ERROR);
         }
 
         return $methods;
     }
 
-    /**
-     * Get fulfillment type from a quote item's additional_data
-     */
-    private function getItemFulfillmentType(\Mage_Sales_Model_Quote_Item $item): string
-    {
-        $additionalData = $item->getAdditionalData();
-
-        if ($additionalData) {
-            $data = json_decode($additionalData, true);
-            if (is_array($data) && isset($data['fulfillment_type'])) {
-                return strtoupper($data['fulfillment_type']);
-            }
-        }
-
-        return 'SHIP';
-    }
 
     /**
      * Get configured product options for a cart item (works for all product types)
