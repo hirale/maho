@@ -180,6 +180,19 @@ final class CustomerProcessor extends \Maho\ApiPlatform\Processor
             }
         }
 
+        // Send the registration email, mirroring Mage_Customer_AccountController: the confirmation
+        // link when confirmation is required, otherwise the welcome ("registered") email — without
+        // it a confirmation-required store leaves the account unconfirmed and unable to log in. The
+        // password is intentionally not passed: the new-account templates don't render it. The
+        // account is already persisted, so a mail failure must not fail an otherwise-successful
+        // creation — log it and continue.
+        try {
+            $emailType = $customer->isConfirmationRequired() ? 'confirmation' : 'registered';
+            $customer->sendNewAccountEmail($emailType, '', $storeId);
+        } catch (\Exception $e) {
+            \Mage::logException($e);
+        }
+
         // Return the created customer (without password)
         return Customer::fromModel($customer);
     }
@@ -548,6 +561,18 @@ final class CustomerProcessor extends \Maho\ApiPlatform\Processor
         $order->setCustomerFirstname($customer->getFirstname());
         $order->setCustomerLastname($customer->getLastname());
         $order->save();
+
+        // Same registration email as createCustomer(): confirmation link when confirmation is
+        // required, otherwise the welcome ("registered") email — without it a confirmation-required
+        // store leaves the account stuck and unable to log in. The generated password is never
+        // emailed (the templates don't render it anyway); the customer sets their own via password
+        // reset. A mail failure must not fail the already-created account.
+        try {
+            $emailType = $customer->isConfirmationRequired() ? 'confirmation' : 'registered';
+            $customer->sendNewAccountEmail($emailType, '', (int) $order->getStoreId());
+        } catch (\Exception $e) {
+            \Mage::logException($e);
+        }
 
         return Customer::fromModel($customer);
     }
